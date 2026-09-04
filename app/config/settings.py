@@ -181,6 +181,15 @@ def load(path: str | None = None) -> Settings:
         if isinstance(entry, dict) and entry.get("address") is not None
     ]
 
+    # Device-set values sit above config.yaml but below the environment,
+    # so a one-off WALKIE_* override still wins for debugging.
+    try:
+        from app.store.overrides import Overrides, apply as apply_overrides
+
+        apply_overrides(settings, Overrides(settings.data_dir))
+    except Exception:
+        log.warning("could not apply saved device settings", exc_info=True)
+
     _apply_env(settings)
 
     clashing = [c.name for c in settings.contacts

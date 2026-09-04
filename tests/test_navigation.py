@@ -13,20 +13,34 @@ import pytest
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
 from app.ui import navigation as nav
-from app.ui.screens import CONTACTS, INBOX, STATUS, TALK
+from app.ui.screens import CONTACTS, EDIT, INBOX, SETTINGS, STATUS, TALK
 
-ALL_SCREENS = (CONTACTS, TALK, INBOX, STATUS)
+ALL_SCREENS = (CONTACTS, TALK, INBOX, STATUS, SETTINGS)
 CLICKS = (SINGLE, DOUBLE, TRIPLE)
 
 
 @pytest.mark.parametrize("screen", (TALK, INBOX, STATUS))
-def test_two_clicks_is_always_back(screen):
-    """The invariant the inbox broke, and the reason users got lost."""
+def test_two_clicks_leaves_a_view(screen):
+    """Views are places you are already in, so two clicks gets you out."""
     assert nav.route(screen, DOUBLE) in (nav.BACK_TALK, nav.BACK_CONTACTS)
 
 
-def test_contacts_is_the_root_so_two_clicks_opens(screen=CONTACTS):
-    assert nav.route(CONTACTS, DOUBLE) == nav.OPEN_TALK
+@pytest.mark.parametrize("screen", nav.MENU_SCREENS)
+def test_two_clicks_opens_a_row_in_a_menu(screen):
+    """Menus are lists you pick from, so two clicks goes in, not out."""
+    assert nav.route(screen, DOUBLE) in (nav.OPEN_TALK, nav.OPEN_SETTING)
+
+
+@pytest.mark.parametrize("screen", ALL_SCREENS)
+def test_every_screen_has_an_advertised_way_out(screen):
+    """The property the inbox actually broke: an escape the footer names."""
+    table = nav.actions(screen)
+    escapes = [(g, label) for g, (action, label) in table.items()
+               if action in nav.LEAVING_ACTIONS and g in CLICKS]
+    assert escapes, f"{screen} has no way out short of exiting the app"
+    shown = " ".join(nav.hints(screen))
+    assert any(label in shown for _g, label in escapes), \
+        f"{screen} does not tell the operator how to leave"
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -68,9 +82,10 @@ def test_empty_inbox_hint_tells_the_truth():
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
 def test_every_hint_mentions_talk_and_exit(screen):
-    text = " ".join(nav.hints(screen))
-    assert "hold to talk" in text
-    assert "4 clicks exit" in text
+    """Wording is abbreviated to fit the panel; the meaning must survive."""
+    text = " ".join(nav.hints(screen)).lower()
+    assert "talk" in text, "every screen must say how to transmit"
+    assert "exit" in text, "every screen must say how to leave the app"
 
 
 def test_navigation_reaches_every_screen():
@@ -80,6 +95,7 @@ def test_navigation_reaches_every_screen():
     targets = {
         nav.OPEN_TALK: TALK, nav.OPEN_INBOX: INBOX, nav.OPEN_STATUS: STATUS,
         nav.BACK_TALK: TALK, nav.BACK_CONTACTS: CONTACTS,
+        nav.OPEN_SETTINGS: SETTINGS,
     }
     while frontier:
         screen = frontier.pop()
@@ -89,6 +105,15 @@ def test_navigation_reaches_every_screen():
                 reachable.add(destination)
                 frontier.append(destination)
     assert reachable == set(ALL_SCREENS)
+
+
+def test_an_open_editor_owns_every_click_but_exit():
+    """Routing an editor's clicks through the screen table would navigate
+    away mid-edit instead of changing the value under the cursor."""
+    table = nav.actions(EDIT)
+    assert nav.route(EDIT, QUAD) == nav.EXIT_APP
+    for gesture in CLICKS:
+        assert gesture not in table
 
 
 def test_app_implements_every_action_in_the_table():

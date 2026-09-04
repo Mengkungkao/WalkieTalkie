@@ -34,16 +34,21 @@ from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
 from app.audio.playback import (CUE_ERROR, CUE_RX, CUE_TX_DONE, CUE_TX_START,
                                 Player)
 from app.config import settings as settings_module
+from app.config.settings import Contact
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE, GestureDetector
 from app.radio import protocol
 from app.radio.link import LoraLink
 from app.radio.sx126x import SX126x
 from app.store.inbox import Inbox
+from app.store.overrides import Overrides
 from app.store.roster import Roster
 from app.ui import navigation, screens, theme
 from app.ui.display import Display
-from app.ui.screens import (CONTACTS, IDLE, INBOX, PLAYING, RECEIVING,
-                            RECORDING, SENDING, STATUS, TALK, ViewState)
+from app.ui.editors import (ChoiceEditor, ClockEditor, ConfirmEditor,
+                            DigitEditor)
+from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PLAYING, RECEIVING,
+                            RECORDING, SENDING, SETTINGS, TALK, ViewState)
+from app.utils import clock
 from app.utils.logger import get_logger
 from app.utils.single_instance import AlreadyRunning, SingleInstance
 
@@ -94,6 +99,8 @@ class WalkieApp:
 
         # --- storage ----------------------------------------------------
         data_dir = settings.data_dir
+        self.overrides = Overrides(data_dir)
+        clock.set_offset(self.overrides.clock_offset)
         self.roster = Roster(settings.contacts, data_dir)
         self.inbox = Inbox(data_dir)
         self.state.inbox = self.inbox.items
@@ -156,13 +163,15 @@ class WalkieApp:
         if self.codec is None:
             self.state.audio_note = "codec2 missing"
         elif not self.recorder.available and not self.player.available:
-            self.state.audio_note = audio_devices.diagnose()
+            self.state.audio_note = audio_devices.diagnose(
+                self.settings.audio.preferred_card)
         elif not self.recorder.available:
             self.state.audio_note = "no microphone"
         elif not self.player.available:
             self.state.audio_note = "no speaker"
         else:
-            self.state.audio_note = audio_devices.diagnose()
+            self.state.audio_note = audio_devices.diagnose(
+                self.settings.audio.preferred_card)
 
     def _refresh_entries(self):
         self.state.entries = self.roster.entries()
@@ -210,6 +219,11 @@ class WalkieApp:
             log.info("gesture %s consumed waking the screen", gesture)
             self._wake.set()
             return
+        if self.state.screen == EDIT and self.state.editor is not None:
+            self._editor_gesture(gesture)
+            self._wake.set()
+            return
+
         action = navigation.route(
             self.state.screen, gesture, inbox_empty=not self.inbox.items
         )
@@ -237,6 +251,9 @@ class WalkieApp:
             navigation.NEXT_MESSAGE: self._next_message,
             navigation.PLAY_SELECTED: self._play_selected,
             navigation.REPLAY_LAST: self._replay_last,
+            navigation.OPEN_SETTINGS: self._open_settings,
+            navigation.NEXT_SETTING: self._next_setting,
+            navigation.OPEN_SETTING: self._open_setting,
         }
 
     def _go(self, screen: str):
@@ -255,11 +272,177 @@ class WalkieApp:
             self.state.inbox_index = (
                 self.state.inbox_index + 1) % len(self.inbox.items)
 
+    # --- settings ---------------------------------------------------------
+    def _settings_items(self) -> list:
+        base = self.overrides.base_address
+        base_name = next(
+            (e.name for e in self.roster.entries() if e.address == base),
+            str(base) if base is not None else "not set",
+        )
+        return [
+            {"key": "device_id", "label": "Device ID",
+             "value": f"{self.settings.radio.address}  ({self.settings.identity.callsign})"},
+            {"key": "base", "label": "Base station", "value": base_name},
+            {"key": "add", "label": "Add device", "value": "pair another radio by address"},
+            {"key": "clock", "label": "Date & time",
+             "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
+            {"key": "reset", "label": "Reset all data",
+             "value": f"{len(self.inbox.items)} message(s), roster, settings",
+             "destructive": True},
+        ]
+
+    def _open_settings(self):
+        self.state.screen = SETTINGS
+        self.state.settings_index = 0
+        self.state.settings_items = self._settings_items()
+
+    def _next_setting(self):
+        items = self.state.settings_items or self._settings_items()
+        self.state.settings_index = (self.state.settings_index + 1) % len(items)
+
+    def _refresh_settings(self):
+        self.state.settings_items = self._settings_items()
+
+    def _open_setting(self):
+        items = self.state.settings_items or self._settings_items()
+        key = items[self.state.settings_index % len(items)]["key"]
+        opener = {
+            "device_id": self._edit_device_id, "base": self._edit_base,
+            "add": self._edit_add_device, "clock": self._edit_clock,
+            "reset": self._edit_reset,
+        }[key]
+        opener()
+
+    def _begin_edit(self, editor, title: str, hint: str = ""):
+        self.state.editor = editor
+        self.state.editor_title = title
+        self.state.editor_hint = hint
+        self.state.screen = EDIT
+
+    def _edit_device_id(self):
+        self._begin_edit(
+            DigitEditor(self.settings.radio.address, digits=5, maximum=65534),
+            "DEVICE ID",
+            "must be unique on the channel",
+        )
+
+    def _edit_base(self):
+        choices = [(e.name, e.address) for e in self.roster.entries()
+                   if not e.is_broadcast]
+        choices.append(("(none)", None))
+        current = self.overrides.base_address
+        index = next((i for i, (_n, a) in enumerate(choices) if a == current), 0)
+        self._begin_edit(ChoiceEditor(choices, index), "BASE STATION")
+
+    def _edit_add_device(self):
+        self._begin_edit(
+            DigitEditor(0, digits=5, maximum=65534), "ADD DEVICE",
+            "the other radio's address",
+        )
+
+    def _edit_clock(self):
+        self._begin_edit(ClockEditor(clock.now()), "DATE & TIME")
+
+    def _edit_reset(self):
+        self._begin_edit(
+            ConfirmEditor("Erase everything?",
+                          "messages, voice clips,\nknown stations and settings"),
+            "RESET",
+        )
+
+    def _editor_gesture(self, gesture: str):
+        editor = self.state.editor
+        if not editor.handle(gesture):
+            return
+        title = self.state.editor_title
+        self.state.editor = None
+        self.state.screen = SETTINGS
+        if editor.cancelled:
+            self.state.flash("cancelled")
+        else:
+            self._commit_edit(title, editor)
+        self._refresh_settings()
+
+    def _commit_edit(self, title: str, editor):
+        if title == "DEVICE ID":
+            self._apply_device_id(editor.value)
+        elif title == "BASE STATION":
+            self.overrides.set_base(editor.value)
+            self.state.flash(f"base: {editor.text}")
+        elif title == "ADD DEVICE":
+            self._apply_add_device(editor.value)
+        elif title == "DATE & TIME":
+            how = clock.apply(editor.to_datetime(), self.overrides)
+            self.state.flash("clock set" if how == "system" else "clock set (app only)")
+        elif title == "RESET":
+            self._apply_reset()
+
+    def _apply_device_id(self, address: int):
+        if address == self.settings.radio.address:
+            return
+        if any(c.address == address for c in self.settings.contacts):
+            self.state.flash("that is a contact's ID", 4.0)
+            self.player.cue(CUE_ERROR)
+            return
+        self.overrides.set("radio", "address", address)
+        self.settings.radio.address = address
+        # The module filters incoming packets on the address in its own
+        # registers, which only provision_radio.py can change -- and that
+        # needs the LCD's GPIO pins. So this takes effect for our own
+        # outgoing src, and the radio must be reprovisioned to match.
+        self.state.address = address
+        self.state.flash(f"ID {address} — reprovision the module", 6.0)
+        log.warning(
+            "device id changed to %d; the module still filters on its "
+            "provisioned address. Run: sudo ./tools/provision.sh --address %d",
+            address, address,
+        )
+
+    def _apply_add_device(self, address: int):
+        if address == self.settings.radio.address:
+            self.state.flash("that is this device's ID", 4.0)
+            self.player.cue(CUE_ERROR)
+            return
+        name = f"node {address}"
+        if self.overrides.add_contact(name, address):
+            self.settings.contacts.append(Contact(name=name, address=address))
+            self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+            self._refresh_entries()
+            self.state.flash(f"added {name}")
+        else:
+            self.state.flash("already known")
+
+    def _apply_reset(self):
+        log.warning("resetting all app data at the operator's request")
+        for item in list(self.inbox.items):
+            if item.voice_file:
+                (self.inbox.voice_dir / item.voice_file).unlink(missing_ok=True)
+        self.inbox.items = []
+        self.inbox.save()
+        self.overrides.clear()
+        clock.set_offset(0.0)
+        try:
+            self.roster._seen = {}
+            self.roster.save()
+        except Exception:
+            log.debug("roster reset failed", exc_info=True)
+        self.state.inbox = self.inbox.items
+        self.state.unread = 0
+        self.state.inbox_index = 0
+        self._refresh_entries()
+        self.state.flash("all data erased", 4.0)
+
     # --- push to talk ---------------------------------------------------
     def _on_talk_start(self):
         """The button has been down long enough to mean speech."""
         self.display.poke()
         if self.state.radio_state in (RECORDING, SENDING):
+            return
+        if self.state.screen == EDIT:
+            # A hold here is not an attempt to talk; it would transmit
+            # whatever half-edited value is on screen.
+            self.state.flash("finish editing first")
+            self._wake.set()
             return
         if self.link is None:
             self.state.flash("radio offline")

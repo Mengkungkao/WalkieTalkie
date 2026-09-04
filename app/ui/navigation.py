@@ -23,7 +23,7 @@ play.
 from __future__ import annotations
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
-from app.ui.screens import CONTACTS, INBOX, STATUS, TALK
+from app.ui.screens import CONTACTS, EDIT, INBOX, SETTINGS, STATUS, TALK
 
 # Actions the app implements. Names, not callables, so this module stays
 # free of app state and can be imported by the screens.
@@ -36,7 +36,21 @@ BACK_TALK = "back_talk"
 NEXT_MESSAGE = "next_message"
 PLAY_SELECTED = "play_selected"
 REPLAY_LAST = "replay_last"
+OPEN_SETTINGS = "open_settings"
+NEXT_SETTING = "next_setting"
+OPEN_SETTING = "open_setting"
 EXIT_APP = "exit_app"
+
+# Screens you pick from, rather than screens you are in. Two clicks opens
+# a row here and leaves everywhere else.
+MENU_SCREENS = (CONTACTS, SETTINGS)
+
+# Actions that move to a different screen. Used to check that no screen
+# can strand the operator.
+LEAVING_ACTIONS = {
+    OPEN_TALK, OPEN_INBOX, OPEN_STATUS, OPEN_SETTINGS,
+    BACK_CONTACTS, BACK_TALK, EXIT_APP,
+}
 
 # gesture -> (action, short label for the on-screen hint)
 SCREEN_ACTIONS = {
@@ -58,7 +72,12 @@ SCREEN_ACTIONS = {
     STATUS: {
         SINGLE: (BACK_CONTACTS, "back"),
         DOUBLE: (BACK_CONTACTS, "back"),
-        TRIPLE: (OPEN_TALK, "talk"),
+        TRIPLE: (OPEN_SETTINGS, "settings"),
+    },
+    SETTINGS: {
+        SINGLE: (NEXT_SETTING, "next"),
+        DOUBLE: (OPEN_SETTING, "open"),
+        TRIPLE: (BACK_CONTACTS, "back"),
     },
 }
 
@@ -77,7 +96,13 @@ GLOBAL_ACTIONS = {QUAD: (EXIT_APP, "exit")}
 
 
 def actions(screen: str, inbox_empty: bool = False) -> dict:
-    """The gesture -> (action, label) map in force for this screen."""
+    """The gesture -> (action, label) map in force for this screen.
+
+    EDIT is absent on purpose: a modal editor routes gestures to itself
+    rather than through this table, so asking for its actions is a bug.
+    """
+    if screen == EDIT:
+        return dict(GLOBAL_ACTIONS)
     if screen == INBOX and inbox_empty:
         table = dict(EMPTY_INBOX_ACTIONS)
     else:
@@ -112,6 +137,10 @@ def hints(screen: str, inbox_empty: bool = False) -> list:
     if len(labels) == 1:
         parts = [f"any click {labels.pop()}"]
 
+    # The second line carries three items, so the trailing two are
+    # abbreviated. Spelled out ("hold to talk · 4 clicks exit") it runs to
+    # 272 px against a 236 px panel and is clipped at both ends -- which
+    # is exactly how it shipped until someone looked at a screenshot.
     first = "  ·  ".join(parts[:2])
-    second_parts = parts[2:] + ["hold to talk", "4 clicks exit"]
-    return [first, "  ·  ".join(second_parts)]
+    second = "  ·  ".join(parts[2:] + ["hold talk", "4 exit"])
+    return [first, second]

@@ -86,11 +86,24 @@ def resolve(configured: str | None, kind: str, preferred_card: str | None = None
     return device
 
 
-def diagnose() -> str:
-    """One-line summary for the status screen."""
+def diagnose(preferred_card: str | None = None) -> str:
+    """One-line summary for the status screen.
+
+    Reports the cards actually chosen, not simply the first of each kind.
+    Naming the first card made the Pi 4B report "spk Headphones" while it
+    was correctly using the Whisplay codec on card 3 -- a status line that
+    contradicts what the app is doing sends you debugging the wrong thing.
+    """
     capture, playback = capture_cards(), playback_cards()
-    if capture and playback:
-        return f"mic {capture[0][1]} / spk {playback[0][1]}"
     if not capture and not playback:
         return "no audio hardware"
-    return f"mic {'yes' if capture else 'NONE'} / spk {'yes' if playback else 'NONE'}"
+
+    def chosen(cards):
+        device = _pick(cards, preferred_card)
+        if device is None:
+            return None
+        index = int(device.rsplit(":", 1)[-1])
+        return next((name for i, name in cards if i == index), None)
+
+    mic, speaker = chosen(capture), chosen(playback)
+    return f"mic {mic or 'NONE'} / spk {speaker or 'NONE'}"

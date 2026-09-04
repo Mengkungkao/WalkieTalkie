@@ -274,14 +274,19 @@ to `~/.whisplay-daemon/daemon-app.log`; raise the level with
 | **Contacts** | next station | open Talk | Status | talk to selection |
 | **Talk** | Inbox | back to Contacts | replay last voice | **talk** |
 | **Inbox** | next message | back to Talk | play it | talk |
-| **Status** | Contacts | Contacts | Talk | talk |
+| **Status** | Contacts | Contacts | Settings | talk |
+| **Settings** | next setting | open it | back to Contacts | talk |
+| *editor* | change value | next field / save | cancel | — |
 
 Four clicks exits from anywhere. Hold-to-talk works on every screen —
 you should never have to navigate somewhere before you can answer.
 
-**Two clicks always means back** (Contacts is the root, so there it
-opens). Three clicks means play wherever there is something to play. An
-empty inbox leaves on any click rather than sitting there ignoring you.
+There are two kinds of screen. **Menus** — Contacts and Settings — are
+lists you pick from, so two clicks opens the highlighted row and three
+goes back. **Views** — Talk, Inbox and Status — are places you already
+are, so two clicks leaves. Three clicks means play wherever there is
+something to play. An empty inbox leaves on any click rather than
+sitting there ignoring you.
 Both the dispatcher and the on-screen hints come from one table in
 [app/ui/navigation.py](app/ui/navigation.py), so a screen cannot
 advertise a gesture the app does not implement — which is exactly how
@@ -292,6 +297,49 @@ The header carries signal strength and a duty-cycle bar that only draws
 attention once the hour's budget is running low.
 
 ---
+
+## Settings
+
+Everything that identifies a node can be set on the device, with the
+button — no editing files over SSH. **Status → 3 clicks → Settings.**
+
+| Setting | What it does |
+|---|---|
+| **Device ID** | this node's radio address, 0–65534 |
+| **Base station** | which contact counts as base |
+| **Add device** | pair another radio by address |
+| **Date & time** | fixes timestamps on a Pi with no RTC |
+| **Reset all data** | erases messages, voice clips, roster and settings |
+
+Editors are driven by the same click language: **1 click** changes the
+value under the cursor, **2 clicks** moves to the next field and saves
+on the last one, **3 clicks** cancels everything. Digits are edited
+most-significant first, with the cursor underlined. Hold-to-talk is
+suspended while an editor is open — a hold there would transmit a
+half-typed address, and you are plainly not trying to talk.
+
+Reset starts on **no**, and you have to click onto **YES** before
+confirming, so no reflex gesture can wipe the inbox.
+
+Changes are saved to `~/.whisplay-walkie/settings.json`, not back into
+`config.yaml` — rewriting that would destroy the comments that explain
+it, and it is version controlled and shared between nodes while a
+device's address must be unique to it. Precedence is defaults <
+`config.yaml` < device settings < environment, so a one-off
+`WALKIE_RADIO_ADDRESS=9 ./run.sh` still wins for debugging.
+
+> **Changing Device ID does not reprovision the radio.** The module
+> filters incoming packets using the address in its own registers, and
+> only `provision_radio.py` can change that — which needs the LCD's GPIO
+> pins. After changing the ID, run
+> `sudo ./tools/provision.sh --address <id>` so the module agrees. The
+> app says so on screen and in the log.
+
+**Every node needs a unique address.** Two nodes sharing one cannot talk:
+each discards the other's traffic as its own echo. The app refuses a
+contact that shares this node's address at startup, counts and explains
+the dropped packets, and `deploy.sh` no longer copies `config.yaml`
+between devices — which used to hand every node the same identity.
 
 ## Power
 

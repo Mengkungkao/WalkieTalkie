@@ -13,8 +13,10 @@ import pytest
 from app.store.inbox import Item
 from app.store.roster import Entry
 from app.ui import screens, theme
-from app.ui.screens import (CONTACTS, IDLE, INBOX, PLAYING, RECEIVING,
-                            RECORDING, SENDING, STATUS, ViewState)
+from app.ui.editors import ChoiceEditor, ClockEditor, ConfirmEditor, DigitEditor
+from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PLAYING, RECEIVING,
+                            RECORDING, SENDING, SETTINGS, STATUS, TALK,
+                            ViewState)
 
 
 class FakeBoard:
@@ -64,6 +66,51 @@ def populated_state(**overrides) -> ViewState:
     return state
 
 
+SETTINGS_ITEMS = [
+    {"key": "device_id", "label": "Device ID", "value": "5  (Rover)"},
+    {"key": "base", "label": "Base station", "value": "Base"},
+    {"key": "add", "label": "Add device", "value": "pair another radio by address"},
+    {"key": "clock", "label": "Date & time", "value": "2026-09-04 14:30  ·  system clock"},
+    {"key": "reset", "label": "Reset all data", "value": "3 message(s), roster, settings",
+     "destructive": True},
+]
+
+
+@pytest.mark.parametrize("index", range(len(SETTINGS_ITEMS)))
+def test_settings_screen_renders_with_each_row_selected(display, index):
+    state = populated_state(screen=SETTINGS, settings_items=SETTINGS_ITEMS,
+                            settings_index=index)
+    assert screens.render(display, state) is True
+
+
+@pytest.mark.parametrize("editor,title", [
+    (DigitEditor(65534, digits=5), "DEVICE ID"),
+    (DigitEditor(0, digits=5), "ADD DEVICE"),
+    (ChoiceEditor([("Base", 1), ("Rover", 5)]), "BASE STATION"),
+    (ClockEditor(__import__("datetime").datetime(2026, 9, 4, 14, 30)), "DATE & TIME"),
+    (ConfirmEditor("Erase everything?", "messages, voice clips\nand settings"), "RESET"),
+])
+def test_every_editor_renders(display, editor, title):
+    state = populated_state(screen=EDIT, editor=editor, editor_title=title)
+    assert screens.render(display, state) is True
+
+
+def test_editor_renders_at_every_cursor_position(display):
+    """The cursor underline is positioned by hand; check it never overflows."""
+    editor = DigitEditor(65534, digits=5)
+    for cursor in range(editor.digits):
+        editor.cursor = cursor
+        display.invalidate()
+        state = populated_state(screen=EDIT, editor=editor, editor_title="DEVICE ID")
+        assert screens.render(display, state) is True
+
+
+def test_editor_screen_survives_a_missing_editor(display):
+    """Focus can be revoked mid-edit; rendering must not raise."""
+    state = populated_state(screen=EDIT, editor=None, editor_title="DEVICE ID")
+    assert screens.render(display, state) is True
+
+
 @pytest.mark.parametrize("screen", [CONTACTS, INBOX, STATUS])
 def test_list_screens_render(display, screen):
     state = populated_state(screen=screen)
@@ -79,7 +126,7 @@ def test_talk_screen_renders_in_every_state(display, radio_state):
     assert screens.render(display, state) is True
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, "talk", INBOX, STATUS])
+@pytest.mark.parametrize("screen", [CONTACTS, "talk", INBOX, STATUS, SETTINGS, EDIT])
 def test_screens_render_with_nothing_in_them(display, screen):
     """First boot: no contacts, no messages, no signal, no audio."""
     state = ViewState(screen=screen, audio_ok=False, audio_note="no audio hardware")
@@ -105,6 +152,39 @@ def test_banner_expires(display):
     state = populated_state(screen="talk")
     state.flash("sent", seconds=0.0)
     assert state.active_banner == ""
+
+
+@pytest.mark.parametrize("screen", [CONTACTS, TALK, INBOX, STATUS, SETTINGS])
+def test_footer_hints_fit_the_panel(screen):
+    """Text that overflows is clipped at both ends and reads as gibberish.
+
+    Every hint line was 250-272 px wide against a 240 px panel until a
+    screenshot showed it; rendering without raising is not the same as
+    fitting.
+    """
+    from PIL import Image, ImageDraw
+
+    from app.ui import navigation
+
+    draw = ImageDraw.Draw(Image.new("RGB", (theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT)))
+    font = theme.font(12)
+    margin = 4
+    for line in navigation.hints(screen):
+        width = draw.textlength(line, font=font)
+        assert width <= theme.SCREEN_WIDTH - margin, (
+            f"{screen}: {line!r} is {width:.0f}px, panel is "
+            f"{theme.SCREEN_WIDTH}px"
+        )
+
+
+def test_empty_inbox_hint_fits_too():
+    from PIL import Image, ImageDraw
+
+    from app.ui import navigation
+
+    draw = ImageDraw.Draw(Image.new("RGB", (theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT)))
+    for line in navigation.hints(INBOX, inbox_empty=True):
+        assert draw.textlength(line, font=theme.font(12)) <= theme.SCREEN_WIDTH - 4
 
 
 def test_frame_is_the_size_the_daemon_expects(display):

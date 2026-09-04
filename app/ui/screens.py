@@ -19,7 +19,11 @@ CONTACTS = "contacts"
 TALK = "talk"
 INBOX = "inbox"
 STATUS = "status"
-SCREEN_ORDER = (CONTACTS, TALK, INBOX, STATUS)
+SETTINGS = "settings"
+# An editor is modal: it owns every gesture while it is open, so it is a
+# screen rather than an overlay on one.
+EDIT = "edit"
+SCREEN_ORDER = (CONTACTS, TALK, INBOX, STATUS, SETTINGS)
 
 # Radio states, in the order they occur during one exchange.
 IDLE = "idle"
@@ -61,6 +65,12 @@ class ViewState:
     inbox: list = field(default_factory=list)
     inbox_index: int = 0
     unread: int = 0
+
+    settings_items: list = field(default_factory=list)
+    settings_index: int = 0
+    editor: object = None
+    editor_title: str = ""
+    editor_hint: str = ""
 
     audio_ok: bool = True
     audio_note: str = ""
@@ -322,8 +332,108 @@ def _hints(screen: str, inbox_empty: bool = False) -> list:
     return navigation.hints(screen, inbox_empty)
 
 
+# --- settings ----------------------------------------------------------
+def draw_settings(draw, state: ViewState):
+    draw_header(draw, state, "SETTINGS")
+
+    if not state.settings_items:
+        centred(draw, 130, "no settings", theme.font(15), theme.TEXT_DIM)
+        return
+
+    visible = 5
+    row_height = 38
+    first = max(0, min(state.settings_index - visible // 2,
+                       len(state.settings_items) - visible))
+    first = max(0, first)
+
+    for offset, item in enumerate(state.settings_items[first:first + visible]):
+        index = first + offset
+        top = HEADER_HEIGHT + 8 + offset * row_height
+        chosen = index == state.settings_index
+        # Destructive entries are tinted so they are never opened by reflex.
+        accent = theme.DANGER if item.get("destructive") else theme.ACCENT
+        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + row_height - 6],
+              fill=theme.SURFACE_HI if chosen else theme.SURFACE,
+              outline=accent if chosen else None)
+
+        name_font = theme.font(14, "bold" if chosen else "regular")
+        draw.text((16, top + 5),
+                  ellipsise(draw, item["label"], name_font, 200),
+                  font=name_font,
+                  fill=(theme.DANGER if item.get("destructive")
+                        else (theme.TEXT if chosen else theme.TEXT_DIM)))
+        value = str(item.get("value", ""))
+        if value:
+            draw.text((16, top + 20),
+                      ellipsise(draw, value, theme.font(11), 200),
+                      font=theme.font(11), fill=theme.TEXT_FAINT)
+
+    if len(state.settings_items) > visible:
+        centred(draw, HEADER_HEIGHT + 8 + visible * row_height - 2,
+                f"{state.settings_index + 1} / {len(state.settings_items)}",
+                theme.font(11), theme.TEXT_FAINT)
+
+    draw_footer(draw, state, _hints(SETTINGS))
+
+
+def draw_editor(draw, state: ViewState):
+    """A modal value editor: one big value, and what the clicks do to it."""
+    editor = state.editor
+    draw_header(draw, state, state.editor_title or "EDIT")
+    if editor is None:
+        return
+
+    confirming = hasattr(editor, "prompt")
+    accent = theme.DANGER if confirming else theme.ACCENT
+
+    if confirming:
+        centred(draw, 66, editor.prompt, theme.font(15, "bold"), theme.TEXT)
+        if editor.detail:
+            for index, line in enumerate(editor.detail.split("\n")[:3]):
+                centred(draw, 92 + index * 16, line, theme.font(12), theme.TEXT_DIM)
+        chosen = theme.DANGER if editor.yes else theme.OK
+        panel(draw, [60, 148, theme.SCREEN_WIDTH - 60, 194],
+              fill=theme.SURFACE_HI, outline=chosen)
+        centred(draw, 158, editor.text, theme.font(26, "bold"), chosen)
+    else:
+        panel(draw, [12, 96, theme.SCREEN_WIDTH - 12, 168],
+              fill=theme.SURFACE, outline=accent)
+        text = editor.text
+        size = 40 if len(text) <= 6 else (22 if len(text) <= 12 else 17)
+        centred(draw, 96 + (72 - size) // 2 - 4, text,
+                theme.font(size, "bold"), theme.TEXT)
+
+        # Underline the field being edited, so the cursor is unmistakable.
+        cursor_label = None
+        if hasattr(editor, "cursor") and hasattr(editor, "digits"):
+            font = theme.font(size, "bold")
+            width = int(draw.textlength(text, font=font))
+            per = width / max(1, len(text))
+            left = (theme.SCREEN_WIDTH - width) / 2 + editor.cursor * per
+            y = 96 + (72 - size) // 2 - 4 + size + 2
+            draw.rectangle([left + 1, y, left + per - 1, y + 3], fill=accent)
+            cursor_label = f"digit {editor.cursor + 1} of {editor.digits}"
+        elif hasattr(editor, "field_name"):
+            cursor_label = f"editing {editor.field_name}"
+        if cursor_label:
+            centred(draw, 174, cursor_label, theme.font(11), theme.TEXT_FAINT)
+
+    if state.editor_hint:
+        centred(draw, 200, ellipsise(draw, state.editor_hint, theme.font(11), 220),
+                theme.font(11), theme.WARN)
+
+    commit = "confirm" if confirming else (
+        "save" if getattr(editor, "cursor", 0) >= getattr(editor, "digits", 1) - 1
+        and hasattr(editor, "digits") else "next")
+    draw_footer(draw, state, [
+        f"1 click change  ·  2 clicks {commit}",
+        "3 clicks cancel  ·  4 clicks exit",
+    ])
+
+
 RENDERERS = {
-    CONTACTS: draw_contacts, TALK: draw_talk, INBOX: draw_inbox, STATUS: draw_status,
+    CONTACTS: draw_contacts, TALK: draw_talk, INBOX: draw_inbox,
+    STATUS: draw_status, SETTINGS: draw_settings, EDIT: draw_editor,
 }
 
 
