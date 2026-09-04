@@ -1,4 +1,4 @@
-# LoRa Walkie-Talkie
+# WalkieTalkie
 
 Push-to-talk voice and text over LoRa, on a Raspberry Pi Zero 2 W with a
 **Whisplay HAT** (240×280 LCD, one button, RGB LED, audio codec) and a
@@ -273,7 +273,7 @@ automatically once they transmit.
 <summary><b>Step 7 — Register with the Whisplay daemon</b></summary>
 
 ```bash
-./install.sh                # adds "LoRa Walkie" to the HAT desktop
+./install.sh                # adds "WalkieTalkie" to the HAT desktop
 ./install.sh --autostart    # ...and starts it at login
 ```
 
@@ -291,7 +291,7 @@ sudo loginctl enable-linger $USER
 ./run.sh
 ```
 
-…or long-press to launch **LoRa Walkie** from the HAT desktop. Logs go
+…or long-press to launch **WalkieTalkie** from the HAT desktop. Logs go
 to `~/.whisplay-daemon/daemon-app.log`; raise the level with
 `WALKIE_LOG_LEVEL=DEBUG ./run.sh`.
 </details>
@@ -328,6 +328,41 @@ The header carries signal strength and a duty-cycle bar that only draws
 attention once the hour's budget is running low.
 
 ---
+
+## Connecting two radios
+
+Hearing a station does not prove it hears you, and a one-way link is the
+classic radio failure — you talk for a minute before discovering nobody
+received a word. So a station counts as connected only once it has
+**answered**.
+
+```
+MengPi  ──hello──▶  jarvis      jarvis knows MengPi is on the air
+MengPi  ◀─hello-ack─  jarvis    both ends now know the link carries
+```
+
+It happens on its own. At startup each node calls every station in its
+contact list, and opening **Talk** on a station that is not connected
+calls it again. A station already in your contacts answers immediately —
+you paired it deliberately, and confirming it every boot would be noise.
+
+An **unknown** station is different: its call is held and the operator is
+asked, because accepting is what adds it to the contact list.
+
+```
+        hilltop is calling
+        address 77
+        accept and add as a contact?
+                 no          ← starts on "no"; 1 click to change
+```
+
+Refusing sends a rejection rather than ignoring it, so the caller learns
+where it stands instead of retrying into silence.
+
+The contacts screen shows the state as a dot: **filled green** answered,
+**hollow amber** calling, **red** refused, **amber** heard but not
+handshaked, **grey** never heard. Talk says `not connected` under the
+disc before you transmit, and Status has a `link` row.
 
 ## Settings
 

@@ -72,6 +72,9 @@ class ViewState:
     editor_title: str = ""
     editor_hint: str = ""
 
+    link_states: dict = field(default_factory=dict)
+    target_linked: bool = False
+
     radio_deaf: bool = False
     radio_note: str = ""
 
@@ -161,8 +164,28 @@ def draw_contacts(draw, state: ViewState):
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
               outline=theme.ACCENT if chosen else None)
 
-        dot = theme.OK if entry.online else theme.TEXT_FAINT
-        draw.ellipse([16, top + 13, 24, top + 21], fill=dot)
+        # Hearing a station does not prove it hears you, and a one-way
+        # link is the classic radio failure -- you talk for a minute
+        # before finding out nobody received a word. So the dot means
+        # "completed a handshake", and presence alone is only a ring.
+        link = state.link_states.get(entry.address)
+        if entry.is_broadcast:
+            dot, filled = theme.ACCENT, True
+        elif link == "linked":
+            dot, filled = theme.OK, True
+        elif link == "calling":
+            dot, filled = theme.WARN, False
+        elif link == "rejected":
+            dot, filled = theme.DANGER, True
+        elif link == "stale" or entry.online:
+            dot, filled = theme.WARN, True
+        else:
+            dot, filled = theme.TEXT_FAINT, False
+        box = [16, top + 13, 24, top + 21]
+        if filled:
+            draw.ellipse(box, fill=dot)
+        else:
+            draw.ellipse(box, outline=dot, width=2)
 
         name_font = theme.font(15, "bold" if chosen else "regular")
         draw.text((32, top + 5),
@@ -225,6 +248,7 @@ def draw_talk(draw, state: ViewState):
 
     centred(draw, 42, label, theme.font(14, "bold"), colour)
 
+
     # Level or progress bar under the disc.
     bar = [24, 186, theme.SCREEN_WIDTH - 24, 198]
     if state.radio_state == RECORDING:
@@ -246,6 +270,18 @@ def draw_talk(draw, state: ViewState):
         elif not state.audio_ok:
             detail = state.audio_note or "no audio device"
             colour = theme.DANGER
+        elif not state.target_linked:
+            # Shown here rather than beside the disc, where it collided
+            # with the ring at this font size.
+            link = None
+            if state.entries and state.selected_index < len(state.entries):
+                link = state.link_states.get(
+                    state.entries[state.selected_index].address)
+            detail, colour = {
+                "calling": ("calling…", theme.WARN),
+                "rejected": ("refused the link", theme.DANGER),
+                "stale": ("not heard recently", theme.WARN),
+            }.get(link, ("not connected — open Talk to call", theme.TEXT_FAINT))
         centred(draw, 188, detail, theme.font(12), colour)
 
     if state.queued:
@@ -309,6 +345,7 @@ def draw_status(draw, state: ViewState):
         ("frequency", f"{state.frequency_mhz} MHz"),
         ("codec", f"codec2 {state.codec_name}"),
         ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
+        ("link", "connected" if state.target_linked else "not connected"),
         ("mode pins", state.radio_note or "not checked"),
         ("last rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
         ("duty cycle", f"{state.duty_fraction * 100:.0f}% used"
@@ -328,6 +365,8 @@ def draw_status(draw, state: ViewState):
             colour = theme.DANGER
         elif label == "mode pins" and state.radio_deaf:
             colour = theme.DANGER
+        elif label == "link":
+            colour = theme.OK if state.target_linked else theme.TEXT_DIM
         draw.text((96, y - 1), ellipsise(draw, value, theme.font(12), 134),
                   font=theme.font(12), fill=colour)
 

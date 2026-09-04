@@ -33,13 +33,29 @@ HEADER_SIZE = HEADER.size  # 7
 MAX_BODY = MAX_FRAME_PAYLOAD - HEADER_SIZE  # 193
 
 # Message types
-HELLO = 0x0  # presence beacon, body is the operator's display name
+HELLO = 0x0  # "I am here" -- body is the operator's display name
 TEXT = 0x1  # UTF-8 text
 VOICE = 0x2  # codec2 bitstream
 ACK = 0x3  # body is the acknowledged msg_id
 BYE = 0x4  # leaving the channel
+HELLO_ACK = 0x5  # "I hear you, and I accept" -- body is our name
+REJECT = 0x6  # "I hear you, and I do not accept"
 
-TYPE_NAMES = {HELLO: "hello", TEXT: "text", VOICE: "voice", ACK: "ack", BYE: "bye"}
+TYPE_NAMES = {HELLO: "hello", TEXT: "text", VOICE: "voice", ACK: "ack",
+              BYE: "bye", HELLO_ACK: "hello-ack", REJECT: "reject"}
+
+# A station is "linked" once it has both heard us and answered. Presence
+# alone is not enough: hearing someone does not prove they hear you, and
+# a one-way link is the classic radio failure -- you talk for a minute
+# before discovering nobody received a word.
+LINK_UNLINKED = "unlinked"
+LINK_CALLING = "calling"
+LINK_LINKED = "linked"
+LINK_STALE = "stale"
+LINK_REJECTED = "rejected"
+
+# How long a completed handshake stays good without hearing anything.
+LINK_TIMEOUT = 20 * 60
 
 BROADCAST = 0xFFFF
 

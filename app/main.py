@@ -131,6 +131,7 @@ class WalkieApp:
         self._open_radio()
 
         self._playback_lock = threading.Lock()
+        self._pending_hello = None
         self._actions = self._build_actions()
         self._refresh_entries()
 
@@ -165,6 +166,7 @@ class WalkieApp:
 
         self.link.on_message(self._on_radio_message)
         self.link.on_tx_progress(self._on_tx_progress)
+        self.link.on_hello(self._on_hello)
         self.link.start()
 
     def _refresh_audio_state(self):
@@ -268,6 +270,10 @@ class WalkieApp:
         }
 
     def _go(self, screen: str):
+        if screen == TALK:
+            selected = self.roster.selected()
+            if selected is not None:
+                self._call(selected.address)
         self.state.screen = screen
 
     def _next_contact(self):
@@ -282,6 +288,75 @@ class WalkieApp:
         if self.inbox.items:
             self.state.inbox_index = (
                 self.state.inbox_index + 1) % len(self.inbox.items)
+
+    # --- handshake ----------------------------------------------------------
+    def _on_hello(self, peer, name: str):
+        """Another station is calling. Called on the receive thread.
+
+        A station already in the contact list is answered immediately --
+        you paired it deliberately, and making someone confirm every boot
+        would be noise. An unknown station is deferred to the operator,
+        because accepting is what puts it in the contact list and lets it
+        be talked to.
+        """
+        known = any(c.address == peer.addr for c in self.settings.contacts)
+        if known:
+            self.state.flash(f"{name or peer.addr} connected")
+            self._wake.set()
+            return True
+        self._pending_hello = (peer.addr, name or f"node {peer.addr}")
+        self._wake.set()
+        return None  # ask the operator
+
+    def _prompt_pending_hello(self):
+        """Show the accept/refuse prompt, once there is a moment to."""
+        if not self._pending_hello or self.state.screen == EDIT:
+            return
+        if self.state.busy or not self.foregrounded:
+            return
+        addr, name = self._pending_hello
+        self._begin_edit(
+            ConfirmEditor(f"{name} is calling", f"address {addr}\naccept and add as a contact?"),
+            "CALLING",
+        )
+
+    def _apply_hello_decision(self, accepted: bool):
+        pending, self._pending_hello = self._pending_hello, None
+        if pending is None or self.link is None:
+            return
+        addr, name = pending
+        if accepted:
+            self.link.accept(addr)
+            if self.overrides.add_contact(name, addr):
+                self.settings.contacts.append(Contact(name=name, address=addr))
+                self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+            self._refresh_entries()
+            self.state.flash(f"{name} connected")
+        else:
+            self.link.refuse(addr)
+            self.state.flash(f"{name} refused")
+
+    def _call(self, addr: int, force: bool = False):
+        """Say hello to a station so both ends know the link works."""
+        if self.link is None or addr == protocol.BROADCAST:
+            return
+        state = self.link.link_state(addr)
+        if not force and state in (protocol.LINK_LINKED, protocol.LINK_CALLING):
+            return
+        log.info("calling %d", addr)
+        self.link.send_hello(addr)
+        self._wake.set()
+
+    def _call_known_contacts(self):
+        """On startup, tell every paired station we are on the air."""
+        for contact in self.settings.contacts:
+            if contact.address != protocol.BROADCAST:
+                self._call(contact.address)
+
+    def _link_states(self) -> dict:
+        if self.link is None:
+            return {}
+        return {addr: peer.link_state for addr, peer in self.link.peers.items()}
 
     # --- background listening ---------------------------------------------
     def _background(self):
@@ -421,7 +496,10 @@ class WalkieApp:
         self.state.editor = None
         self.state.screen = SETTINGS
         if editor.cancelled:
-            self.state.flash("cancelled")
+            if title == "CALLING":
+                self._apply_hello_decision(False)
+            else:
+                self.state.flash("cancelled")
         else:
             self._commit_edit(title, editor)
         self._refresh_settings()
@@ -441,6 +519,8 @@ class WalkieApp:
             self._apply_reset()
         elif title == "QUIT":
             self.stop("user")
+        elif title == "CALLING":
+            self._apply_hello_decision(True)
 
     def _apply_device_id(self, address: int):
         if address == self.settings.radio.address:
@@ -787,14 +867,15 @@ class WalkieApp:
             self.recorder.arm()
         self._beacon_due = time.monotonic() + (
             self.settings.power.beacon_interval_seconds or 1e9)
-        if self.link and self.settings.power.beacon_interval_seconds:
-            self.link.send_hello()
+        if self.link is not None:
+            self._call_known_contacts()
 
         while self.running:
             self._sync_state()
             screens.render(self.display, self.state)
             self.display.apply_idle_policy(keep_awake=self.state.busy)
             self._follow_idle_with_the_microphone()
+            self._prompt_pending_hello()
 
             timeout = self._next_timeout()
             self._wake.wait(timeout)

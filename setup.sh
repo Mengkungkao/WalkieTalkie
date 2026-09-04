@@ -254,5 +254,5 @@ else
     echo "${BOLD}${GREEN}Ready.${RESET}"
 fi
 echo
-echo "Start it:   ./run.sh          (or pick 'LoRa Walkie' on the HAT desktop)"
+echo "Start it:   ./run.sh          (or pick 'WalkieTalkie' on the HAT desktop)"
 echo "Controls:   hold = talk · 1 click = next · 2 = select · 3 = replay · 4 = exit"

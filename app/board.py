@@ -30,8 +30,8 @@ from app.utils.logger import get_logger
 log = get_logger("board")
 
 APP_ID = "whisplay-lora-walkie"
-DISPLAY_NAME = "LoRa Walkie"
-ICON = "LW"
+DISPLAY_NAME = "WalkieTalkie"
+ICON = "WT"
 EXIT_GESTURE = "none"
 PRIORITY = 45
 

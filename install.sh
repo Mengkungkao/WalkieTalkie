@@ -50,8 +50,8 @@ body = {
     "version": 1, "cmd": "app.register",
     "payload": {
         "app_id": "whisplay-lora-walkie",
-        "display_name": "LoRa Walkie",
-        "icon": "LW",
+        "display_name": "WalkieTalkie",
+        "icon": "WT",
         "launch_command": f"{root}/run.sh",
         "cwd": root,
         # The app owns every gesture: single clicks step through

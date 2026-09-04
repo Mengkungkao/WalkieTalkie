@@ -49,6 +49,11 @@ class Peer:
     last_heard: float = 0.0
     last_rssi: int | None = None
     messages: int = 0
+    # Handshake state. `linked_at` is set when the station answered our
+    # hello, or accepted theirs -- proof the link carries both ways.
+    linked_at: float = 0.0
+    called_at: float = 0.0
+    rejected: bool = False
 
     @property
     def seconds_since_heard(self) -> float:
@@ -57,6 +62,22 @@ class Peer:
     @property
     def present(self) -> bool:
         return self.seconds_since_heard < PRESENCE_TIMEOUT
+
+    @property
+    def link_state(self) -> str:
+        if self.rejected:
+            return protocol.LINK_REJECTED
+        if self.linked_at:
+            if self.seconds_since_heard < protocol.LINK_TIMEOUT:
+                return protocol.LINK_LINKED
+            return protocol.LINK_STALE
+        if self.called_at and time.monotonic() - self.called_at < 30:
+            return protocol.LINK_CALLING
+        return protocol.LINK_UNLINKED
+
+    @property
+    def linked(self) -> bool:
+        return self.link_state == protocol.LINK_LINKED
 
 
 @dataclass
@@ -93,6 +114,7 @@ class LoraLink:
         self._running = threading.Event()
         self._on_message = None
         self._on_tx_progress = None
+        self._on_hello = None
         self._peers_lock = threading.Lock()
 
     # --- callbacks -----------------------------------------------------
@@ -103,6 +125,15 @@ class LoraLink:
     def on_tx_progress(self, callback):
         """callback(sent: int, total: int) -- for the sending progress bar."""
         self._on_tx_progress = callback
+
+    def on_hello(self, callback):
+        """callback(peer, name) -> bool: accept this station's handshake?
+
+        Called on the receive thread when another radio calls us. Return
+        True to answer and link, False to refuse. Returning None leaves
+        the decision pending, for a UI that wants to ask the operator.
+        """
+        self._on_hello = callback
 
     # --- lifecycle -----------------------------------------------------
     def start(self):
@@ -169,10 +200,25 @@ class LoraLink:
     def _deliver(self, message, peer: Peer):
         self.stats.messages_rx += 1
         peer.messages += 1
-        if message.type == protocol.HELLO:
+
+        if message.type in (protocol.HELLO, protocol.HELLO_ACK):
             name = message.body.decode("utf-8", "replace").strip()[:20]
             if name:
                 peer.name = name
+
+        if message.type == protocol.HELLO:
+            # Answer the handshake here, but still hand the message up:
+            # the app wants to refresh the roster and tell the operator
+            # who just called.
+            self._handle_hello(peer)
+        elif message.type == protocol.HELLO_ACK:
+            peer.linked_at = time.time()
+            peer.rejected = False
+            log.info("linked with %s (%d)", peer.name or "?", peer.addr)
+        elif message.type == protocol.REJECT:
+            peer.rejected = True
+            peer.linked_at = 0.0
+            log.warning("%s (%d) refused the link", peer.name or "?", peer.addr)
         log.info(
             "rx %s from %d (%s) %d B%s",
             message.type_name, message.src, peer.name or "unknown",
@@ -184,6 +230,47 @@ class LoraLink:
                 self._on_message(message, peer)
             except Exception:
                 log.exception("message handler failed")
+
+    def _handle_hello(self, peer: Peer):
+        """Another station is calling us. Answer, refuse, or defer."""
+        decision = True
+        if self._on_hello is not None:
+            try:
+                decision = self._on_hello(peer, peer.name)
+            except Exception:
+                log.exception("hello handler failed")
+                decision = False
+        if decision is None:
+            log.info("%s (%d) is calling; waiting for the operator",
+                     peer.name or "?", peer.addr)
+            return
+        if decision:
+            peer.linked_at = time.time()
+            peer.rejected = False
+            self.send_hello_ack(peer.addr)
+            log.info("accepted %s (%d)", peer.name or "?", peer.addr)
+        else:
+            self.send_reject(peer.addr)
+            log.info("refused %s (%d)", peer.name or "?", peer.addr)
+
+    def accept(self, addr: int):
+        """Answer a deferred handshake, e.g. after the operator agreed."""
+        peer = self._touch_peer(addr, None)
+        peer.linked_at = time.time()
+        peer.rejected = False
+        self.send_hello_ack(addr)
+
+    def refuse(self, addr: int):
+        peer = self._touch_peer(addr, None)
+        peer.rejected = True
+        peer.linked_at = 0.0
+        self.send_reject(addr)
+
+    def link_state(self, addr: int) -> str:
+        if addr == protocol.BROADCAST:
+            return protocol.LINK_LINKED  # broadcast needs no handshake
+        peer = self.peers.get(addr)
+        return peer.link_state if peer else protocol.LINK_UNLINKED
 
     def tick(self):
         """Flush partial messages whose sender went quiet. Cheap; call rarely."""
@@ -223,14 +310,36 @@ class LoraLink:
         self._enqueue(dst, packets, f"voice/{msg_id}")
         return msg_id
 
-    def send_hello(self, dst: int = protocol.BROADCAST) -> int:
+    def _send_named(self, type_: int, dst: int, label: str) -> int:
         msg_id = next(self._msg_ids)
         packets = protocol.fragment(
-            protocol.HELLO, self.radio.addr, msg_id,
+            type_, self.radio.addr, msg_id,
             self.callsign.encode("utf-8")[: protocol.MAX_BODY],
         )
-        self._enqueue(dst, packets, "hello")
+        self._enqueue(dst, packets, label)
         return msg_id
+
+    def send_hello(self, dst: int = protocol.BROADCAST) -> int:
+        """Call a station. It is linked once it answers."""
+        if dst != protocol.BROADCAST:
+            peer = self._touch_peer_quiet(dst)
+            peer.called_at = time.monotonic()
+        return self._send_named(protocol.HELLO, dst, "hello")
+
+    def send_hello_ack(self, dst: int) -> int:
+        return self._send_named(protocol.HELLO_ACK, dst, "hello-ack")
+
+    def send_reject(self, dst: int) -> int:
+        return self._send_named(protocol.REJECT, dst, "reject")
+
+    def _touch_peer_quiet(self, addr: int) -> Peer:
+        """Get or create a peer without claiming we heard from it."""
+        with self._peers_lock:
+            peer = self.peers.get(addr)
+            if peer is None:
+                peer = Peer(addr=addr)
+                self.peers[addr] = peer
+            return peer
 
     def pending(self) -> int:
         return self._tx.qsize()
