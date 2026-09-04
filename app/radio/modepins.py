@@ -119,7 +119,12 @@ def check_and_warn(m0: int = DEFAULT_M0, m1: int = DEFAULT_M1) -> dict:
         log.info("cannot inspect the mode pins: %s", result["detail"])
         return result
     if result["transparent"]:
-        log.info("mode pins ok: M0=0 M1=0, the module is listening")
+        # Deliberately not "the module is listening". This reads the Pi's
+        # own pins; it cannot tell whether they are actually wired to the
+        # module. Unconnected pins read low and look perfect, which is
+        # exactly the false all-clear this tool exists to avoid giving.
+        log.info("mode pins M0=0 M1=0 (transparent) -- assuming they reach "
+                 "the module's M0/M1")
         return result
 
     log.error(
