@@ -204,6 +204,31 @@ def watch_foreground_grants(proxy, on_reacquired, socket_path: str):
     threading.Thread(target=loop, name="foreground-watch", daemon=True).start()
 
 
+def request_foreground(socket_path: str = "/tmp/whisplay-daemon.sock") -> bool:
+    """Ask the daemon to give the screen to the already-running instance.
+
+    Used by a second copy that the single-instance lock turned away. The
+    resident process is subscribed to events, so the grant reaches it as
+    `app_foreground_acquired` and `watch_foreground_grants` re-attaches
+    the framebuffer -- the same path as returning to a running app from
+    the desktop.
+    """
+    body = {"version": 1, "cmd": "app.focus.acquire", "payload": {"app_id": APP_ID}}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(3)
+            client.connect(socket_path)
+            client.sendall((json.dumps(body) + "\n").encode("utf-8"))
+            reply = json.loads(client.makefile("r").readline() or "{}")
+        if reply.get("ok"):
+            log.info("brought the running instance to the front")
+            return True
+        log.warning("daemon refused to foreground us: %s", reply)
+    except Exception:
+        log.warning("could not reach the daemon to foreground us", exc_info=True)
+    return False
+
+
 def acquire_board(launch_command: str | None = None,
                   launch_cwd: str | None = None,
                   on_foreground_acquired=None):

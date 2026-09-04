@@ -229,8 +229,8 @@ class WalkieApp:
         )
         if action is None:
             return
-        if action == navigation.EXIT_APP:
-            self.stop("user")
+        if action == navigation.BACKGROUND_APP:
+            self._background()
             return
         handler = self._actions.get(action)
         if handler is None:
@@ -272,6 +272,48 @@ class WalkieApp:
             self.state.inbox_index = (
                 self.state.inbox_index + 1) % len(self.inbox.items)
 
+    # --- background listening ---------------------------------------------
+    def _background(self):
+        """Give the screen back but keep listening.
+
+        Exiting used to close the serial port, which made the radio deaf
+        the moment you left the app -- so a message sent while you were
+        on the desktop was simply lost. A walkie-talkie that only hears
+        you when its screen is open is not a walkie-talkie.
+
+        The process stays resident instead: the link keeps running,
+        incoming voice still arrives, is stored, and plays out loud. It
+        costs 39 MB and no measurable CPU, because every thread is parked
+        in a blocking syscall.
+
+        Returning is the path already built for focus recovery -- pick
+        the app on the desktop, the daemon grants focus and
+        `board.watch_foreground_grants` re-attaches the framebuffer.
+        """
+        if not getattr(self.board, "foreground_ready", False):
+            return
+        log.info("going to background; the radio stays up and listening")
+
+        # Hand the panel back lit, or the desktop is drawn onto a dark screen.
+        self.display.restore_backlight()
+        self.display.set_led(theme.LED_IDLE)
+        # Nothing is going to press talk while we are off screen.
+        if self.recorder.available and self.recorder.armed:
+            self.recorder.disarm()
+
+        try:
+            self.board.foreground_ready = False
+            if hasattr(self.board, "release_focus"):
+                self.board.release_focus()
+        except Exception:
+            log.warning("could not release the screen", exc_info=True)
+        self.state.screen = CONTACTS
+        self._wake.set()
+
+    @property
+    def foregrounded(self) -> bool:
+        return bool(getattr(self.board, "foreground_ready", False))
+
     # --- settings ---------------------------------------------------------
     def _settings_items(self) -> list:
         base = self.overrides.base_address
@@ -288,6 +330,9 @@ class WalkieApp:
              "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
             {"key": "reset", "label": "Reset all data",
              "value": f"{len(self.inbox.items)} message(s), roster, settings",
+             "destructive": True},
+            {"key": "quit", "label": "Stop the radio",
+             "value": "stops listening until relaunched",
              "destructive": True},
         ]
 
@@ -309,7 +354,7 @@ class WalkieApp:
         opener = {
             "device_id": self._edit_device_id, "base": self._edit_base,
             "add": self._edit_add_device, "clock": self._edit_clock,
-            "reset": self._edit_reset,
+            "reset": self._edit_reset, "quit": self._edit_quit,
         }[key]
         opener()
 
@@ -350,6 +395,13 @@ class WalkieApp:
             "RESET",
         )
 
+    def _edit_quit(self):
+        self._begin_edit(
+            ConfirmEditor("Stop the radio?",
+                          "four clicks only hides it;\nthis stops receiving"),
+            "QUIT",
+        )
+
     def _editor_gesture(self, gesture: str):
         editor = self.state.editor
         if not editor.handle(gesture):
@@ -376,6 +428,8 @@ class WalkieApp:
             self.state.flash("clock set" if how == "system" else "clock set (app only)")
         elif title == "RESET":
             self._apply_reset()
+        elif title == "QUIT":
+            self.stop("user")
 
     def _apply_device_id(self, address: int):
         if address == self.settings.radio.address:
@@ -682,7 +736,9 @@ class WalkieApp:
         """
         if not self.recorder.available or self.recorder.recording:
             return
-        should_be_armed = not self.display.screen_off
+        # Backgrounded: nobody can press talk, so the codec can power down
+        # even though our own backlight tracking says the screen is lit.
+        should_be_armed = self.foregrounded and not self.display.screen_off
         if should_be_armed and not self.recorder.armed:
             self.recorder.arm()
         elif not should_be_armed and self.recorder.armed:
@@ -794,8 +850,14 @@ def main():
     try:
         lock = SingleInstance(settings.data_dir).acquire()
     except AlreadyRunning as exc:
-        log.error("%s -- exiting", exc)
-        return 1
+        # Expected once the app autostarts: picking it on the desktop makes
+        # the daemon spawn a second copy, because it only tracks processes
+        # it launched itself. Rather than dying silently and leaving the
+        # user staring at a desktop, ask the daemon to foreground the copy
+        # that is already running -- its watcher re-attaches on the grant.
+        log.info("%s; asking the daemon to bring it to the front", exc)
+        board_module.request_foreground()
+        return 0
 
     app = WalkieApp(settings)
 

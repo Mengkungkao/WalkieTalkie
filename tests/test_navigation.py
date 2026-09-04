@@ -44,8 +44,9 @@ def test_every_screen_has_an_advertised_way_out(screen):
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
-def test_four_clicks_always_exits(screen):
-    assert nav.route(screen, QUAD) == nav.EXIT_APP
+def test_four_clicks_always_hides_the_app(screen):
+    """Hides, not quits: quitting would close the port and go deaf."""
+    assert nav.route(screen, QUAD) == nav.BACKGROUND_APP
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -61,8 +62,8 @@ def test_empty_inbox_is_not_a_dead_end():
         assert nav.route(INBOX, gesture, inbox_empty=True) == nav.BACK_TALK
 
 
-def test_empty_inbox_still_exits_on_four_clicks():
-    assert nav.route(INBOX, QUAD, inbox_empty=True) == nav.EXIT_APP
+def test_empty_inbox_still_hides_on_four_clicks():
+    assert nav.route(INBOX, QUAD, inbox_empty=True) == nav.BACKGROUND_APP
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -85,7 +86,7 @@ def test_every_hint_mentions_talk_and_exit(screen):
     """Wording is abbreviated to fit the panel; the meaning must survive."""
     text = " ".join(nav.hints(screen)).lower()
     assert "talk" in text, "every screen must say how to transmit"
-    assert "exit" in text, "every screen must say how to leave the app"
+    assert "hide" in text, "every screen must say how to leave the app"
 
 
 def test_navigation_reaches_every_screen():
@@ -111,7 +112,7 @@ def test_an_open_editor_owns_every_click_but_exit():
     """Routing an editor's clicks through the screen table would navigate
     away mid-edit instead of changing the value under the cursor."""
     table = nav.actions(EDIT)
-    assert nav.route(EDIT, QUAD) == nav.EXIT_APP
+    assert nav.route(EDIT, QUAD) == nav.BACKGROUND_APP
     for gesture in CLICKS:
         assert gesture not in table
 
@@ -121,7 +122,7 @@ def test_app_implements_every_action_in_the_table():
     from app.main import WalkieApp
 
     app = WalkieApp.__new__(WalkieApp)  # no hardware needed for the mapping
-    implemented = set(WalkieApp._build_actions(app).keys()) | {nav.EXIT_APP}
+    implemented = set(WalkieApp._build_actions(app).keys()) | {nav.BACKGROUND_APP}
 
     declared = set()
     for screen in ALL_SCREENS:
