@@ -183,6 +183,16 @@ def load(path: str | None = None) -> Settings:
 
     _apply_env(settings)
 
+    clashing = [c.name for c in settings.contacts
+                if c.address == settings.radio.address]
+    if clashing:
+        log.error(
+            "radio.address is %d, but contact(s) %s use that address too. "
+            "Two nodes on one address cannot talk: each drops the other's "
+            "traffic as its own echo. Give every node a unique address.",
+            settings.radio.address, ", ".join(clashing),
+        )
+
     if settings.radio.mode_pins and len(settings.radio.mode_pins) != 2:
         log.warning("radio.mode_pins must be [M0, M1]; ignoring %r",
                     settings.radio.mode_pins)

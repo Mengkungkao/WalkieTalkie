@@ -18,11 +18,19 @@ HERE="$(dirname "$(readlink -f "$0")")"
 SSH_OPTS=(-o ConnectTimeout=25)   # a Zero 2 W is slow to answer; 10s hangs
 
 echo "==> syncing to ${TARGET}:${REMOTE_DIR}"
+# config.yaml is excluded on purpose: it carries this node's radio
+# address, which must differ from every other node's. Syncing it would
+# quietly give two radios the same address on every deploy, and they
+# would then discard each other's traffic as their own echo.
 rsync -az --delete \
     --exclude '.git' --exclude '.venv' --exclude '__pycache__' \
-    --exclude '*.pyc' --exclude '.pytest_cache' \
+    --exclude '*.pyc' --exclude '.pytest_cache' --exclude 'config.yaml' \
     -e "ssh ${SSH_OPTS[*]}" \
     "${HERE}/" "${TARGET}:${REMOTE_DIR}/"
+
+# Seed a config only where there is not one already.
+rsync -az --ignore-existing -e "ssh ${SSH_OPTS[*]}" \
+    "${HERE}/config.yaml" "${TARGET}:${REMOTE_DIR}/config.yaml"
 
 echo "==> installing dependencies"
 ssh "${SSH_OPTS[@]}" "$TARGET" "bash -s" <<REMOTE

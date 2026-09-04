@@ -489,6 +489,22 @@ class WalkieApp:
             }
         self.state.unread = self.inbox.unread
 
+    def _follow_idle_with_the_microphone(self):
+        """Keep the capture stream alive only while the radio is in use.
+
+        A warm codec makes push-to-talk instant but draws current
+        continuously, so arming tracks the backlight: lit means the
+        operator is here and PTT must not lose their first word; blanked
+        means the radio is idle and the codec should power down.
+        """
+        if not self.recorder.available or self.recorder.recording:
+            return
+        should_be_armed = not self.display.screen_off
+        if should_be_armed and not self.recorder.armed:
+            self.recorder.arm()
+        elif not should_be_armed and self.recorder.armed:
+            self.recorder.disarm()
+
     def _next_timeout(self) -> float:
         """How long we may sleep before something needs attention.
 
@@ -515,6 +531,10 @@ class WalkieApp:
             self.state.audio_note, self.state.codec_name,
         )
         self.gestures.start()
+        # Warm the codec now: a cold open costs ~690 ms of lost speech,
+        # and the operator may press talk the moment the app appears.
+        if self.recorder.available:
+            self.recorder.arm()
         self._beacon_due = time.monotonic() + (
             self.settings.power.beacon_interval_seconds or 1e9)
         if self.link and self.settings.power.beacon_interval_seconds:
@@ -524,6 +544,7 @@ class WalkieApp:
             self._sync_state()
             screens.render(self.display, self.state)
             self.display.apply_idle_policy(keep_awake=self.state.busy)
+            self._follow_idle_with_the_microphone()
 
             timeout = self._next_timeout()
             self._wake.wait(timeout)
@@ -549,7 +570,7 @@ class WalkieApp:
     def _shutdown(self):
         log.info("shutting down (%s)", self._exit_reason)
         try:
-            self.recorder.cancel()
+            self.recorder.close()
             self.player.stop()
         except Exception:
             pass

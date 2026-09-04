@@ -67,6 +67,7 @@ class Stats:
     bytes_rx: int = 0
     frames_dropped: int = 0
     messages_rx: int = 0
+    self_addressed_drops: int = 0
     last_rssi: int | None = None
     airtime_used: float = 0.0
     queue_depth: int = 0
@@ -142,7 +143,19 @@ class LoraLink:
             self.stats.frames_dropped += 1
             return
         if packet.src == self.radio.addr:
-            return  # our own broadcast heard back through a repeater
+            # Normally our own broadcast heard back through a repeater. But
+            # it is also what a second node misconfigured with our address
+            # looks like -- and then this line silently eats every message
+            # it sends, with nothing in the log to explain the silence.
+            self.stats.self_addressed_drops += 1
+            if self.stats.self_addressed_drops in (1, 10, 100):
+                log.warning(
+                    "dropped a %s packet claiming our own address (%d): either a "
+                    "repeater echo, or another node is configured with the same "
+                    "address -- every node needs a unique radio.address",
+                    protocol.TYPE_NAMES.get(packet.type, packet.type), packet.src,
+                )
+            return
 
         self.stats.packets_rx += 1
         if rssi is not None:
