@@ -1,0 +1,72 @@
+# LoRa Walkie-Talkie configuration.
+#
+# Every value here has a working default in app/config/settings.py, so
+# an empty file still runs. Environment variables win over this file:
+#   WALKIE_RADIO_ADDRESS=7 WALKIE_IDENTITY_CALLSIGN=Rover ./run.sh
+
+radio:
+  port: /dev/ttyS0
+  # This node's address, 0-65534. Every radio on the channel needs a
+  # different one. 65535 is reserved for broadcast.
+  address: 5
+  frequency_mhz: 868
+  # Air rate, not UART rate. Higher is faster but shorter-ranged; 9600
+  # keeps a ~1 km line-of-sight link while sending a 10 s voice message
+  # in about two seconds of airtime.
+  air_speed: 9600
+  power_dbm: 22
+  uart_baud: 9600
+  # ETSI caps EU 868 at 1% duty cycle: 36 seconds of transmit per hour.
+  # The app enforces it. Set 100 only where you are licensed to.
+  duty_cycle_percent: 1.0
+  # M0/M1. Leave null: GPIO 22 and 27 belong to the Whisplay LCD, and
+  # the module is configured once by provision_radio.py instead. Fill in
+  # [m0, m1] only if you rewired the mode pins to free GPIOs.
+  mode_pins: null
+
+identity:
+  callsign: whisplay
+
+audio:
+  # "auto" picks the Whisplay card when it exists, else the first real
+  # capture/playback card. Override for a USB headset, e.g. plughw:2.
+  capture_device: auto
+  playback_device: auto
+  preferred_card: whisplay
+  # 700C is 700 bps: robotic but intelligible, and 100 bytes per second.
+  # 1300 sounds better and costs 1.75x the airtime. 3200 is 4x.
+  codec_mode: 700C
+  max_record_seconds: 20
+  cues: true
+
+ui:
+  brightness: 80
+  # The backlight dominates power draw, so it steps down while idle and
+  # returns on any button press or received packet.
+  idle_dim_seconds: 25
+  idle_dim_brightness: 15
+  idle_off_seconds: 120
+  led_enabled: true
+
+input:
+  debounce_ms: 75
+  # Measured on this button: deliberate multi-clicks land 158-522 ms
+  # apart, ordinary clicks 1214 ms or more. 700 ms is the empty band.
+  click_window_ms: 700
+  # Push-to-talk opens the mic this long after the press.
+  hold_ms: 350
+
+power:
+  # Periodic "I am here" beacons cost duty-cycle budget. Off by default;
+  # set e.g. 900 to announce yourself every 15 minutes.
+  beacon_interval_seconds: 0
+  tick_seconds: 5
+
+# Paired devices. These appear on the contacts screen whether or not the
+# other radio is switched on. Stations not listed here still show up
+# automatically once they transmit.
+contacts:
+  - name: Base
+    address: 1
+  - name: Rover
+    address: 2
