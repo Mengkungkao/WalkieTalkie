@@ -137,6 +137,20 @@ class Display:
         except Exception:
             log.debug("backlight write failed", exc_info=True)
 
+    def restore_backlight(self):
+        """Return the panel to normal brightness.
+
+        The daemon sets the backlight exactly once, when it starts, and
+        `_release_focus` does not touch it -- the desktop simply inherits
+        whatever the last foreground app left behind. So an app that dims
+        or blanks the screen owns the job of handing it back lit, or the
+        user returns to a desktop that is being drawn correctly onto a
+        dark panel and looks like dead hardware.
+        """
+        self._last_activity = time.monotonic()
+        self.set_backlight(self.settings.brightness)
+        self.invalidate()
+
     def poke(self):
         """The operator did something, or a packet arrived: wake the screen."""
         self._last_activity = time.monotonic()

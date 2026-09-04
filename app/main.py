@@ -45,6 +45,7 @@ from app.ui.display import Display
 from app.ui.screens import (CONTACTS, IDLE, INBOX, PLAYING, RECEIVING,
                             RECORDING, SENDING, STATUS, TALK, ViewState)
 from app.utils.logger import get_logger
+from app.utils.single_instance import AlreadyRunning, SingleInstance
 
 log = get_logger("main")
 
@@ -61,6 +62,7 @@ class WalkieApp:
     def __init__(self, settings):
         self.settings = settings
         self.running = True
+        self._closing = False
         self._wake = threading.Event()
         self._exit_reason = "normal"
 
@@ -179,7 +181,17 @@ class WalkieApp:
         self.stop("daemon")
 
     def _on_focus_revoked(self, *_args):
-        log.info("focus revoked; the radio keeps running")
+        """Stop drawing; the radio keeps running.
+
+        Deliberately passive. The framebuffer is gone, so drawing would
+        write into a torn-down mapping, and grabbing the screen back
+        would take it from whatever the user just switched to. When the
+        daemon decides to hand it back it says so, and
+        `board.watch_foreground_grants` re-attaches on that event.
+        """
+        if self._closing:
+            return
+        log.info("focus revoked; still listening, waiting for the screen back")
         try:
             self.board.foreground_ready = False
         except Exception:
@@ -187,7 +199,16 @@ class WalkieApp:
 
     # --- gestures ------------------------------------------------------
     def _on_gesture(self, gesture: str):
+        # A press on a blanked screen means "wake up", not "do the thing
+        # that happens to be under the cursor". Acting on a gesture the
+        # operator could not see the target of is how you end up
+        # transmitting to the wrong station.
+        was_dark = self.display.screen_off
         self.display.poke()
+        if was_dark and gesture != QUAD:
+            log.info("gesture %s consumed waking the screen", gesture)
+            self._wake.set()
+            return
         if gesture == QUAD:
             self.stop("user")
             return
@@ -518,6 +539,7 @@ class WalkieApp:
 
     def stop(self, reason: str = "normal"):
         self._exit_reason = reason
+        self._closing = True
         self.running = False
         self._wake.set()
 
@@ -539,7 +561,10 @@ class WalkieApp:
         self.inbox.save()
         try:
             self.display.set_led(theme.LED_IDLE)
-            self.display.set_backlight(0)
+            # Hand the panel back lit: the daemon inherits this brightness
+            # for its desktop and never resets it, so blanking here leaves
+            # the user staring at what looks like broken hardware.
+            self.display.restore_backlight()
             if hasattr(self.board, "prepare_exit"):
                 self.board.prepare_exit()
             if hasattr(self.board, "release_focus"):
@@ -548,13 +573,23 @@ class WalkieApp:
         except Exception:
             log.debug("board cleanup failed", exc_info=True)
         log.info(
-            "frames pushed %d, skipped %d",
+            "frames pushed %d, skipped %d; backlight handed back at %s%%",
             self.display.frames_pushed, self.display.frames_skipped,
+            self.display._backlight,
         )
 
 
 def main():
     settings = settings_module.load()
+
+    # Two instances fight the daemon for focus several times a second and
+    # interleave bytes into the same radio. Refuse rather than thrash.
+    try:
+        lock = SingleInstance(settings.data_dir).acquire()
+    except AlreadyRunning as exc:
+        log.error("%s -- exiting", exc)
+        return 1
+
     app = WalkieApp(settings)
 
     def handle_signal(signum, _frame):
@@ -569,6 +604,8 @@ def main():
     except KeyboardInterrupt:
         app.stop("keyboard")
         app._shutdown()
+    finally:
+        lock.release()
     return 0
 
 

@@ -17,7 +17,9 @@ exit itself, using the much tighter 700 ms click window.
 
 from __future__ import annotations
 
+import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -93,7 +95,7 @@ class NullBoard:
     def cleanup(self): pass
 
 
-def _start_foreground_retry(proxy, on_acquired=None,
+def start_foreground_retry(proxy, on_acquired=None,
                             interval: float = FOREGROUND_RETRY_SECONDS):
     """Keep asking for the screen until whoever holds it lets go.
 
@@ -121,6 +123,85 @@ def _start_foreground_retry(proxy, on_acquired=None,
             return
 
     threading.Thread(target=loop, name="foreground-retry", daemon=True).start()
+
+
+def _reattach_framebuffer(proxy, session_token: str):
+    """Adopt a session the daemon granted us and re-map its framebuffer."""
+    proxy._session_token = session_token
+    payload = proxy._send_request("framebuffer.acquire", {
+        "app_id": APP_ID, "session_token": session_token,
+    })["payload"]
+    proxy._attach_framebuffer(payload["buffer_handle"], int(payload["stride"]))
+
+
+def watch_foreground_grants(proxy, on_reacquired, socket_path: str):
+    """Re-attach the framebuffer when the daemon hands the screen back.
+
+    This exists because of a gap in `whisplay_client`. When the user
+    returns to an app that is still running, the daemon does not wait to
+    be asked: `_launch_app` sees the process alive, calls `_grant_focus`
+    itself -- which mints a **new session token and reallocates the
+    framebuffer** -- and broadcasts `app_foreground_acquired`. The
+    client's event loop handles `button_pressed`, `button_released`,
+    `app_exit_requested` and `app_focus_revoked`, and silently drops
+    that one.
+
+    The app is then left holding a torn-down mmap and a stale token
+    while the daemon, believing the app is foreground, stops drawing the
+    desktop. Nobody paints anything: the screen goes black and stays
+    black until the app is killed.
+
+    Two traps, both hit while fixing this:
+
+    * **Do not poll `acquire_foreground`.** After a back gesture the app
+      is still running with the desktop showing, and a retry loop would
+      snatch the screen from the user every few seconds.
+    * **Do not call `acquire_foreground` from this handler.** It sends
+      `app.focus.acquire`, the daemon answers by granting focus, and
+      granting focus broadcasts `app_foreground_acquired` -- straight
+      back into this handler, forever. The session token arrives in the
+      event payload, so adopt that and ask only for the framebuffer;
+      `framebuffer.acquire` broadcasts nothing. A token we already hold
+      is our own grant echoing back and is ignored.
+    """
+
+    def loop():
+        while True:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(socket_path)
+                    body = {"version": 1, "cmd": "events.subscribe",
+                            "payload": {"app_id": APP_ID}}
+                    client.sendall((json.dumps(body) + "\n").encode("utf-8"))
+                    reader = client.makefile("r")
+                    if not reader.readline():
+                        raise RuntimeError("subscription ack missing")
+                    for line in reader:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        event = json.loads(line)
+                        # Only this one event; the client owns the rest.
+                        if event.get("event") != "app_foreground_acquired":
+                            continue
+                        token = (event.get("payload") or {}).get("session_token")
+                        if not token:
+                            continue
+                        if token == getattr(proxy, "_session_token", None):
+                            continue  # our own acquire, echoed back
+                        log.info("daemon granted the screen back; re-attaching")
+                        try:
+                            _reattach_framebuffer(proxy, token)
+                        except Exception:
+                            log.warning("re-attach failed", exc_info=True)
+                            continue
+                        proxy.foreground_ready = True
+                        if on_reacquired:
+                            on_reacquired()
+            except Exception:
+                time.sleep(1.0)
+
+    threading.Thread(target=loop, name="foreground-watch", daemon=True).start()
 
 
 def acquire_board(launch_command: str | None = None,
@@ -165,11 +246,18 @@ def acquire_board(launch_command: str | None = None,
     try:
         proxy.acquire_foreground(timeout_sec=2.0)
         proxy.foreground_ready = True
+        # Started only now: our own acquire triggers a grant broadcast,
+        # and the watcher recognises it as ours by the session token --
+        # which does not exist until acquire_foreground has returned.
+        watch_foreground_grants(proxy, on_foreground_acquired,
+                                client.DEFAULT_DAEMON_SOCKET_PATH)
         return proxy, "daemon"
     except Exception:
         # Another app owns the screen. Keep the radio running and take
         # the display over as soon as it is free.
         proxy.foreground_ready = False
         log.warning("another app holds the screen; retrying in the background")
-        _start_foreground_retry(proxy, on_foreground_acquired)
+        start_foreground_retry(proxy, on_foreground_acquired)
+        watch_foreground_grants(proxy, on_foreground_acquired,
+                                client.DEFAULT_DAEMON_SOCKET_PATH)
         return proxy, "waiting"

@@ -391,8 +391,42 @@ a duty-cycle exhaustion — entirely in software.
 | `radio offline` on screen | Port busy or HAT unseated | `fuser -v /dev/ttyS0` |
 | Nothing received | Address or frequency mismatch | `provision_radio.py --check` on both |
 | `no microphone` / `no audio hardware` | Sound card not registered | See below |
-| Display stays blank | Another app holds the foreground | The app retries every 5 s; check `app.list` |
+| Screen black after exiting the app | Fixed — see below | Update; the app now hands the backlight back lit |
+| Screen black after returning to the app | Fixed — see below | Update; the app re-attaches on the daemon's grant |
+| Display stays blank at launch | Another app holds the foreground | The app retries every 5 s; check `app.list` |
 | Sending stalls, "duty cycle full" | Hour's airtime spent | Wait, or raise `duty_cycle_percent` where licensed |
+
+**Black screen (fixed in this app, worth knowing about).** Two separate
+daemon behaviours both end in a dark panel, and both bit this app:
+
+1. **The daemon sets the backlight exactly once, at its own startup.**
+   `_release_focus` re-renders the desktop but never touches brightness,
+   so the desktop simply inherits whatever the last foreground app left.
+   An app that blanks the screen on exit hands back a desktop being
+   drawn perfectly onto an unlit panel. The app now calls
+   `Display.restore_backlight()` on the way out — never `set_backlight(0)`.
+
+2. **`whisplay_client` ignores `app_foreground_acquired`.** When you
+   return to an app that is still running, the daemon does not wait to be
+   asked: it calls `_grant_focus` itself, which mints a new session token
+   and *reallocates the framebuffer*, then broadcasts that event. The
+   stock client handles the other four events and drops this one, so the
+   app keeps drawing into a torn-down mapping while the daemon, believing
+   the app is foreground, stops drawing the desktop. Nobody paints
+   anything. `board.watch_foreground_grants()` listens for that event and
+   re-attaches using the token from its payload.
+
+   Two traps live there: never *poll* `acquire_foreground` (after a back
+   gesture the desktop is showing, and polling snatches the screen from
+   the user every few seconds), and never call `acquire_foreground` from
+   the handler — it makes the daemon grant focus, which rebroadcasts the
+   event, which re-enters the handler. That loop was measured at 24 focus
+   grants per second.
+
+If you ever see the screen thrashing and a core pinned, check for two
+copies of the app: `pgrep -f "app.main"`. Two instances ping-pong the
+foreground between themselves and interleave bytes into the same radio.
+There is now an `flock` guard that refuses the second one.
 
 **Sound card not registering.** Voice needs a working capture device.
 Check whether the card ever finished probing:
