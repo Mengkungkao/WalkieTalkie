@@ -83,10 +83,16 @@ the same port the LoRa HAT uses. `setup.sh` detects and fixes this.
 ### The short way
 
 ```bash
-git clone https://github.com/Mengkungkao/WalkieTalkie.git
+git clone git@github.com:Mengkungkao/WalkieTalkie.git
 cd WalkieTalkie
 ./setup.sh
 ```
+
+> This repository is private, so a plain HTTPS clone onto a headless Pi
+> will stop at `could not read Username for 'https://github.com'`.
+> [docs/cloning-to-a-pi.md](docs/cloning-to-a-pi.md) covers the three
+> ways through that — agent forwarding, a deploy key, or an account key
+> — and the errors each one produces when it is the wrong choice.
 
 `setup.sh` walks all eight steps below, asks before it changes anything,
 and is safe to re-run. `--check` reports without changing; `--yes` runs
