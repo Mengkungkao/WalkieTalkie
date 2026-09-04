@@ -942,13 +942,13 @@ def main():
     try:
         lock = SingleInstance(settings.data_dir).acquire()
     except AlreadyRunning as exc:
-        # Expected once the app autostarts: picking it on the desktop makes
-        # the daemon spawn a second copy, because it only tracks processes
-        # it launched itself. Rather than dying silently and leaving the
-        # user staring at a desktop, ask the daemon to foreground the copy
-        # that is already running -- its watcher re-attaches on the grant.
-        log.info("%s; asking the daemon to bring it to the front", exc)
-        board_module.request_foreground()
+        # Exit quietly, and above all do not ask the daemon for focus.
+        # The daemon binds focus to the process it spawned and revokes it
+        # when that process exits, so a stub that grabs focus and quits
+        # makes the screen flick to the app and straight back to the
+        # desktop, over and over. The app must be launched by the daemon,
+        # not by systemd -- see tools/launch_via_daemon.py.
+        log.info("%s; leaving it alone", exc)
         return 0
 
     app = WalkieApp(settings)

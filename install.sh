@@ -77,21 +77,28 @@ REGISTER
 if [ "$AUTOSTART" = "1" ]; then
     echo "==> installing systemd user service"
     mkdir -p ~/.config/systemd/user
+    # Ask the daemon to launch it rather than running it ourselves. The
+    # daemon ties foreground focus to the process it spawned and revokes
+    # focus when that process exits, so an app started by systemd cannot
+    # be opened from the desktop: the daemon spawns a second copy, that
+    # copy hits the single-instance lock and exits, and the daemon reads
+    # the exit as the app quitting. The screen flicks to the app and
+    # straight back to the desktop, every time.
     cat > ~/.config/systemd/user/walkie-talkie.service <<UNIT
 [Unit]
-Description=LoRa Walkie-Talkie
+Description=WalkieTalkie (launched through whisplay-daemon)
 After=whisplay-daemon.service
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory=${HERE}
-ExecStart=${HERE}/run.sh
-Restart=on-failure
-RestartSec=5
+ExecStart=/usr/bin/python3 ${HERE}/tools/launch_via_daemon.py
 
 [Install]
 WantedBy=default.target
 UNIT
+    systemctl --user disable --now walkie-talkie.service >/dev/null 2>&1 || true
     systemctl --user daemon-reload
     systemctl --user enable --now walkie-talkie.service
     echo "     enabled. Survives reboot only with: sudo loginctl enable-linger $USER"
