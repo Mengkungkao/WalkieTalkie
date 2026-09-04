@@ -37,6 +37,7 @@ from app.config import settings as settings_module
 from app.config.settings import Contact
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE, GestureDetector
 from app.radio import protocol
+from app.radio import modepins
 from app.radio.link import LoraLink
 from app.radio.sx126x import SX126x
 from app.store.inbox import Inbox
@@ -152,6 +153,16 @@ class WalkieApp:
             duty_cycle_percent=radio_settings.duty_cycle_percent,
             callsign=self.settings.identity.callsign,
         )
+        # The module is deaf unless M0/M1 are both low, and on this
+        # hardware the LCD drives those pins. Say so rather than letting
+        # every transmission succeed into nothing.
+        pins = tuple(mode_pins) if mode_pins else (22, 27)
+        health = modepins.check_and_warn(*pins)
+        self.state.radio_deaf = health["readable"] and not health["transparent"]
+        self.state.radio_note = health.get("detail", "")
+        if self.state.radio_deaf:
+            self.state.flash("radio deaf: check M0/M1", 10.0)
+
         self.link.on_message(self._on_radio_message)
         self.link.on_tx_progress(self._on_tx_progress)
         self.link.start()

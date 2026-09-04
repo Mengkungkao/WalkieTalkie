@@ -72,6 +72,9 @@ class ViewState:
     editor_title: str = ""
     editor_hint: str = ""
 
+    radio_deaf: bool = False
+    radio_note: str = ""
+
     audio_ok: bool = True
     audio_note: str = ""
     codec_name: str = "700C"
@@ -235,10 +238,15 @@ def draw_talk(draw, state: ViewState):
               state.tx_sent / state.tx_total if state.tx_total else 0.0, theme.WARN)
     else:
         detail = f"codec2 {state.codec_name}  ·  {state.frequency_mhz} MHz"
-        if not state.audio_ok:
+        colour = theme.TEXT_FAINT
+        if state.radio_deaf:
+            # Worth shouting about: everything else looks like it works.
+            detail = "RADIO DEAF — check M0/M1 jumpers"
+            colour = theme.DANGER
+        elif not state.audio_ok:
             detail = state.audio_note or "no audio device"
-        centred(draw, 188, detail, theme.font(12),
-                theme.TEXT_FAINT if state.audio_ok else theme.DANGER)
+            colour = theme.DANGER
+        centred(draw, 188, detail, theme.font(12), colour)
 
     if state.queued:
         centred(draw, 220, f"{state.queued} queued", theme.font(11), theme.WARN)
@@ -301,6 +309,7 @@ def draw_status(draw, state: ViewState):
         ("frequency", f"{state.frequency_mhz} MHz"),
         ("codec", f"codec2 {state.codec_name}"),
         ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
+        ("mode pins", state.radio_note or "not checked"),
         ("last rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
         ("duty cycle", f"{state.duty_fraction * 100:.0f}% used"
                        f"  ({state.duty_remaining:.0f}s left)"),
@@ -314,7 +323,11 @@ def draw_status(draw, state: ViewState):
     for index, (label, value) in enumerate(rows):
         y = top + index * 21
         draw.text((12, y), label, font=theme.font(11), fill=theme.TEXT_FAINT)
-        colour = theme.DANGER if (label == "audio" and not state.audio_ok) else theme.TEXT
+        colour = theme.TEXT
+        if label == "audio" and not state.audio_ok:
+            colour = theme.DANGER
+        elif label == "mode pins" and state.radio_deaf:
+            colour = theme.DANGER
         draw.text((96, y - 1), ellipsise(draw, value, theme.font(12), 134),
                   font=theme.font(12), fill=colour)
 

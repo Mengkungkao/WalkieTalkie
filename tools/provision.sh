@@ -1,54 +1,90 @@
 #!/usr/bin/env bash
-# Provision the LoRa module, borrowing the display's GPIO pins safely.
+# Provision the LoRa module, getting everything else off the radio first.
 #
 #   sudo ./tools/provision.sh --address 5 --frequency 868
 #
-# Why this wrapper exists: setting the module's frequency, address and
-# air rate requires driving M0/M1, which are GPIO 22 and 27 -- the same
-# lines whisplay-daemon uses for the LCD. While the daemon runs it
-# redraws continuously, overwriting M1 microseconds after we raise it,
-# so the module never enters config mode and simply never answers. The
-# symptom is "no reply from the module", which reads like broken wiring.
+# Two things have to be out of the way, and forgetting either produces a
+# misleading failure.
 #
-# So the daemon is stopped for the few seconds this takes, and restarted
-# afterwards even if provisioning fails or you Ctrl-C out -- leaving the
-# display dead would be a far worse outcome than an unprovisioned radio.
+# **The walkie app holds /dev/ttyS0.** Once it autostarts it is always
+# running, so provisioning cannot open the port at all -- the tool
+# reports "cannot open /dev/ttyS0: Device or resource busy", which reads
+# like a permissions problem. It is a user service, so stopping it needs
+# no root.
+#
+# **whisplay-daemon drives M0/M1.** They are GPIO 22 and 27, which it
+# uses for the LCD, and it redraws continuously -- overwriting M1
+# microseconds after we raise it, so the module never enters config mode
+# and never answers. That one reads like broken wiring. Stopping it needs
+# root; without root we fall back to --force, which drives the pins
+# directly and usually wins the race, then verifies by reading back.
+#
+# Everything stopped here is restarted from an EXIT trap, so a failure or
+# a Ctrl-C still gives back the display and the radio.
 set -uo pipefail
 cd "$(dirname "$(dirname "$(readlink -f "$0")")")"
 
+APP_SERVICE=walkie-talkie.service
 DAEMON=whisplay-daemon
-WAS_ACTIVE=0
-systemctl is-active --quiet "$DAEMON" && WAS_ACTIVE=1
+RUN_AS="${SUDO_USER:-$USER}"
+APP_WAS_ACTIVE=0
+DAEMON_WAS_ACTIVE=0
+
+as_user() {
+    if [ "$(id -u)" -eq 0 ] && [ "$RUN_AS" != "root" ]; then
+        runuser -u "$RUN_AS" -- "$@"
+    else
+        "$@"
+    fi
+}
+
+user_systemctl() {
+    as_user env XDG_RUNTIME_DIR="/run/user/$(id -u "$RUN_AS")" systemctl --user "$@"
+}
 
 restore() {
-    if [ "$WAS_ACTIVE" = 1 ]; then
+    if [ "$APP_WAS_ACTIVE" = 1 ]; then
+        echo "==> restarting $APP_SERVICE"
+        user_systemctl start "$APP_SERVICE" 2>/dev/null \
+            || echo "!! restart it with: systemctl --user start $APP_SERVICE" >&2
+    fi
+    if [ "$DAEMON_WAS_ACTIVE" = 1 ]; then
         echo "==> restarting $DAEMON"
-        systemctl start "$DAEMON" || echo "!! could not restart $DAEMON -- run: sudo systemctl start $DAEMON" >&2
+        systemctl start "$DAEMON" 2>/dev/null \
+            || echo "!! restart it with: sudo systemctl start $DAEMON" >&2
     fi
 }
 trap restore EXIT INT TERM
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "!! run with sudo: sudo $0 $*" >&2
-    exit 1
+# The radio app first: it holds the serial port, and it needs no root.
+if user_systemctl is-active --quiet "$APP_SERVICE" 2>/dev/null; then
+    APP_WAS_ACTIVE=1
+    echo "==> stopping $APP_SERVICE (it holds /dev/ttyS0)"
+    user_systemctl stop "$APP_SERVICE"
+fi
+as_user pkill -f "python3 -m app.main" 2>/dev/null || true
+sleep 1
+
+FORCE=()
+if systemctl is-active --quiet "$DAEMON"; then
+    if [ "$(id -u)" -eq 0 ]; then
+        DAEMON_WAS_ACTIVE=1
+        echo "==> stopping $DAEMON to free GPIO 22/27 (M0/M1)"
+        systemctl stop "$DAEMON"
+        sleep 2
+    else
+        echo "==> no root: leaving $DAEMON up and driving M0/M1 directly"
+        echo "    (re-run with sudo if the module does not answer)"
+        FORCE=(--force)
+    fi
 fi
 
-if [ "$WAS_ACTIVE" = 1 ]; then
-    echo "==> stopping $DAEMON to free GPIO 22/27 (M0/M1)"
-    systemctl stop "$DAEMON"
-    sleep 2
-fi
-
-# Drop back to the invoking user: provisioning needs /dev/ttyS0 (dialout)
-# and /dev/gpiomem (gpio), not root, and running it as root would leave
-# root-owned __pycache__ behind in the working tree.
-RUN_AS="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 echo "==> provisioning as $RUN_AS"
-runuser -u "$RUN_AS" -- python3 provision_radio.py --force "$@"
+as_user python3 provision_radio.py "${FORCE[@]}" "$@"
 STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
     echo "==> verifying"
-    runuser -u "$RUN_AS" -- python3 provision_radio.py --check --force
+    as_user python3 provision_radio.py --check "${FORCE[@]}" || true
 fi
 exit $STATUS
