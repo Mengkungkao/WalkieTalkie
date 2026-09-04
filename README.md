@@ -67,10 +67,41 @@ bank (`0xC0`) once from [provision_radio.py](provision_radio.py), then
 never touches GPIO: the module keeps its frequency, address and air rate
 across power cycles and stays in transparent mode.
 
-> **Remove the M0/M1 jumpers on the LoRa HAT** so the two boards do not
-> drive the same lines. If you would rather keep runtime mode control,
-> rewire M0/M1 to free pins (GPIO 5, 6, 12, 13, 16 and 26 are unused) and
-> set `radio.mode_pins: [5, 6]` in `config.yaml`.
+### Fixing the M0/M1 clash
+
+Leaving the jumpers on is not an option: the LCD parks those lines
+somewhere deaf, and the app will tell you so — *"THE RADIO IS DEAF:
+module is in configuration mode (100% of the time)"* — because
+everything above the radio otherwise reports success while nothing goes
+on the air.
+
+**Whichever option you pick, remove the two jumpers first.** Tying a pin
+to ground while a GPIO is still driving it high shorts that output
+through the pin and can damage the Pi.
+
+**Option A — rewire to free GPIOs (recommended).** Two jumper wires from
+the HAT's M0/M1 to spare pins, then:
+
+```yaml
+radio:
+  mode_pins: [5, 6]      # M0 -> GPIO5 (pin 29), M1 -> GPIO6 (pin 31)
+```
+
+The app drives them low itself, and `provision_radio.py` picks the pins
+up from this setting automatically. Free on both Pis here: **GPIO 5, 6,
+12, 13, 16, 26**. Do not use 14/15 (the UART to this module), 2/3 (the
+audio codec's I²C), 9/10/11 (the LCD's SPI) or 18–21 (I²S audio) — they
+look unclaimed in `gpioinfo` but are in use.
+
+**Option B — tie M0 and M1 to ground.** Both pins to any GND pin (6, 9,
+14, 20, 25, 30, 34, 39) forces transparent mode permanently. Simpler,
+and fine if the radio never needs reconfiguring again.
+
+The catch is that configuration mode needs **M1 high**, so grounded pins
+mean the module can never be reprovisioned without unsoldering — and
+that includes changing **Device ID from the Settings screen**, which is
+only half-applied until the module is reprovisioned to match. If you
+expect to change addresses, frequency or air rate, take option A.
 
 **2. A serial console will corrupt every transmission.** Raspberry Pi OS
 puts a kernel console and a login prompt on `/dev/ttyS0` by default —

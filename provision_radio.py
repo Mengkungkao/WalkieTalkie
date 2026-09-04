@@ -47,7 +47,7 @@ def daemon_running() -> bool:
         return False
 
 
-def gpio_conflict() -> str | None:
+def gpio_conflict(pins=DEFAULT_MODE_PINS) -> str | None:
     """Name whoever currently holds M0/M1, so the error is actionable."""
     try:
         output = subprocess.run(["gpioinfo"], capture_output=True, text=True,
@@ -55,7 +55,7 @@ def gpio_conflict() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     for line in output.splitlines():
-        for pin in DEFAULT_MODE_PINS:
+        for pin in pins:
             if f'line  {pin:2d}:' in line and "consumer=" in line:
                 consumer = line.split('consumer="')[-1].split('"')[0]
                 if consumer and consumer != "unused":
@@ -76,22 +76,31 @@ def main() -> int:
     parser.add_argument("--power", type=int, default=defaults.power_dbm,
                         choices=sorted(POWER_DBM))
     parser.add_argument("--net-id", type=int, default=0)
-    parser.add_argument("--m0", type=int, default=DEFAULT_MODE_PINS[0])
-    parser.add_argument("--m1", type=int, default=DEFAULT_MODE_PINS[1])
+    # Default to whatever config.yaml says, so a rewired HAT does not need
+    # the pins repeated on every command -- and, more importantly, so this
+    # tool cannot drive GPIO 22/27 into the LCD after M0/M1 have been moved
+    # off them.
+    configured = defaults.mode_pins or DEFAULT_MODE_PINS
+    parser.add_argument("--m0", type=int, default=int(configured[0]))
+    parser.add_argument("--m1", type=int, default=int(configured[1]))
     parser.add_argument("--check", action="store_true",
                         help="read the current settings and exit")
     parser.add_argument("--force", action="store_true",
                         help="proceed even if the mode pins look busy")
     args = parser.parse_args()
 
-    if daemon_running():
+    moved = tuple(defaults.mode_pins or ()) not in ((), tuple(DEFAULT_MODE_PINS))
+    if moved:
+        print(f"using mode pins from config.yaml: M0=GPIO{args.m0} M1=GPIO{args.m1}")
+
+    if daemon_running() and not moved:
         print(f"! {DAEMON} is running and owns GPIO {args.m0}/{args.m1}.",
               file=sys.stderr)
         print(f"  Stop it first:  sudo systemctl stop {DAEMON}", file=sys.stderr)
         if not args.force:
             return 2
 
-    conflict = gpio_conflict()
+    conflict = None if moved else gpio_conflict()
     if conflict and not args.force:
         print(f"! {conflict}. Stop that process, or pass --force.", file=sys.stderr)
         return 2

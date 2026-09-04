@@ -65,8 +65,17 @@ fi
 as_user pkill -f "python3 -m app.main" 2>/dev/null || true
 sleep 1
 
+# If M0/M1 have been rewired off GPIO 22/27, the display no longer
+# contends for them and the daemon can stay up.
+MOVED=$(as_user python3 -c "
+from app.config.settings import load
+pins = load().radio.mode_pins or []
+print('yes' if list(pins) not in ([], [22, 27]) else 'no')" 2>/dev/null || echo no)
+
 FORCE=()
-if systemctl is-active --quiet "$DAEMON"; then
+if [ "$MOVED" = "yes" ]; then
+    echo "==> mode pins are rewired off the LCD; leaving $DAEMON alone"
+elif systemctl is-active --quiet "$DAEMON"; then
     if [ "$(id -u)" -eq 0 ]; then
         DAEMON_WAS_ACTIVE=1
         echo "==> stopping $DAEMON to free GPIO 22/27 (M0/M1)"
