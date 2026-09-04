@@ -40,7 +40,7 @@ from app.radio.link import LoraLink
 from app.radio.sx126x import SX126x
 from app.store.inbox import Inbox
 from app.store.roster import Roster
-from app.ui import screens, theme
+from app.ui import navigation, screens, theme
 from app.ui.display import Display
 from app.ui.screens import (CONTACTS, IDLE, INBOX, PLAYING, RECEIVING,
                             RECORDING, SENDING, STATUS, TALK, ViewState)
@@ -123,6 +123,7 @@ class WalkieApp:
         self._open_radio()
 
         self._playback_lock = threading.Lock()
+        self._actions = self._build_actions()
         self._refresh_entries()
 
     # --- setup helpers -------------------------------------------------
@@ -209,49 +210,50 @@ class WalkieApp:
             log.info("gesture %s consumed waking the screen", gesture)
             self._wake.set()
             return
-        if gesture == QUAD:
+        action = navigation.route(
+            self.state.screen, gesture, inbox_empty=not self.inbox.items
+        )
+        if action is None:
+            return
+        if action == navigation.EXIT_APP:
             self.stop("user")
             return
-        handler = {
-            CONTACTS: self._contacts_gesture, TALK: self._talk_gesture,
-            INBOX: self._inbox_gesture, STATUS: self._status_gesture,
-        }[self.state.screen]
-        handler(gesture)
+        handler = self._actions.get(action)
+        if handler is None:
+            log.warning("no handler for action %s", action)
+            return
+        handler()
         self._wake.set()
 
-    def _contacts_gesture(self, gesture: str):
-        if gesture == SINGLE:
-            self.roster.advance()
-            self._refresh_entries()
-        elif gesture == DOUBLE:
-            self.state.screen = TALK
-        elif gesture == TRIPLE:
-            self.state.screen = STATUS
+    def _build_actions(self) -> dict:
+        """Action name -> what it does. Keys must cover navigation's table."""
+        return {
+            navigation.NEXT_CONTACT: self._next_contact,
+            navigation.OPEN_TALK: lambda: self._go(TALK),
+            navigation.OPEN_INBOX: self._open_inbox,
+            navigation.OPEN_STATUS: lambda: self._go(STATUS),
+            navigation.BACK_CONTACTS: lambda: self._go(CONTACTS),
+            navigation.BACK_TALK: lambda: self._go(TALK),
+            navigation.NEXT_MESSAGE: self._next_message,
+            navigation.PLAY_SELECTED: self._play_selected,
+            navigation.REPLAY_LAST: self._replay_last,
+        }
 
-    def _talk_gesture(self, gesture: str):
-        if gesture == SINGLE:
-            self.state.screen = INBOX
-            self.state.inbox_index = 0
-        elif gesture == DOUBLE:
-            self.state.screen = CONTACTS
-        elif gesture == TRIPLE:
-            self._replay_last()
+    def _go(self, screen: str):
+        self.state.screen = screen
 
-    def _inbox_gesture(self, gesture: str):
-        if gesture == SINGLE:
-            if self.inbox.items:
-                self.state.inbox_index = (
-                    self.state.inbox_index + 1) % len(self.inbox.items)
-        elif gesture == DOUBLE:
-            self._play_selected()
-        elif gesture == TRIPLE:
-            self.state.screen = TALK
+    def _next_contact(self):
+        self.roster.advance()
+        self._refresh_entries()
 
-    def _status_gesture(self, gesture: str):
-        if gesture in (SINGLE, DOUBLE):
-            self.state.screen = CONTACTS
-        elif gesture == TRIPLE:
-            self.state.screen = TALK
+    def _open_inbox(self):
+        self.state.screen = INBOX
+        self.state.inbox_index = 0
+
+    def _next_message(self):
+        if self.inbox.items:
+            self.state.inbox_index = (
+                self.state.inbox_index + 1) % len(self.inbox.items)
 
     # --- push to talk ---------------------------------------------------
     def _on_talk_start(self):
@@ -404,8 +406,9 @@ class WalkieApp:
 
     def _play_selected(self):
         if not self.inbox.items:
+            self.state.flash("inbox empty")
             return
-        item = self.inbox.items[self.state.inbox_index]
+        item = self.inbox.items[self.state.inbox_index % len(self.inbox.items)]
         if item.kind != "voice" or not item.voice_file:
             self.state.flash("nothing to play")
             return

@@ -170,8 +170,7 @@ def draw_contacts(draw, state: ViewState):
                 f"{state.selected_index + 1} / {len(state.entries)}",
                 theme.font(11), theme.TEXT_FAINT)
 
-    draw_footer(draw, state, ["1 click next  ·  hold to talk",
-                              "2 clicks open  ·  4 clicks exit"])
+    draw_footer(draw, state, _hints(CONTACTS))
 
 
 # --- talk --------------------------------------------------------------
@@ -237,8 +236,7 @@ def draw_talk(draw, state: ViewState):
         centred(draw, 220, f"duty cycle: {state.duty_remaining:.0f}s left",
                 theme.font(11), theme.WARN)
 
-    draw_footer(draw, state, ["hold to talk  ·  1 click inbox",
-                              "2 clicks back  ·  3 replay last"])
+    draw_footer(draw, state, _hints(TALK))
 
 
 # --- inbox -------------------------------------------------------------
@@ -248,7 +246,7 @@ def draw_inbox(draw, state: ViewState):
     if not state.inbox:
         centred(draw, 120, "nothing received yet", theme.font(14), theme.TEXT_DIM)
         centred(draw, 142, "the radio is listening", theme.font(12), theme.TEXT_FAINT)
-        draw_footer(draw, state, ["hold to talk  ·  2 clicks back"])
+        draw_footer(draw, state, _hints(INBOX, inbox_empty=True))
         return
 
     visible = 5
@@ -280,8 +278,7 @@ def draw_inbox(draw, state: ViewState):
         draw.text((theme.SCREEN_WIDTH - 52, top + 21), item.when,
                   font=theme.font(10), fill=theme.TEXT_FAINT)
 
-    draw_footer(draw, state, ["1 click next  ·  2 clicks play",
-                              "hold to talk  ·  3 back"])
+    draw_footer(draw, state, _hints(INBOX))
 
 
 # --- status ------------------------------------------------------------
@@ -311,7 +308,18 @@ def draw_status(draw, state: ViewState):
         draw.text((96, y - 1), ellipsise(draw, value, theme.font(12), 134),
                   font=theme.font(12), fill=colour)
 
-    draw_footer(draw, state, ["1 click next screen", "4 clicks exit"])
+    draw_footer(draw, state, _hints(STATUS))
+
+
+def _hints(screen: str, inbox_empty: bool = False) -> list:
+    """Footer text, generated from the gesture table the app dispatches on.
+
+    Imported lazily: navigation imports this module for the screen names,
+    so a module-level import would be circular.
+    """
+    from app.ui import navigation
+
+    return navigation.hints(screen, inbox_empty)
 
 
 RENDERERS = {

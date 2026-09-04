@@ -273,11 +273,20 @@ to `~/.whisplay-daemon/daemon-app.log`; raise the level with
 |---|---|---|---|---|
 | **Contacts** | next station | open Talk | Status | talk to selection |
 | **Talk** | Inbox | back to Contacts | replay last voice | **talk** |
-| **Inbox** | next message | play it | back to Talk | talk |
+| **Inbox** | next message | back to Talk | play it | talk |
 | **Status** | Contacts | Contacts | Talk | talk |
 
 Four clicks exits from anywhere. Hold-to-talk works on every screen —
 you should never have to navigate somewhere before you can answer.
+
+**Two clicks always means back** (Contacts is the root, so there it
+opens). Three clicks means play wherever there is something to play. An
+empty inbox leaves on any click rather than sitting there ignoring you.
+Both the dispatcher and the on-screen hints come from one table in
+[app/ui/navigation.py](app/ui/navigation.py), so a screen cannot
+advertise a gesture the app does not implement — which is exactly how
+the inbox once ended up printing "2 clicks back" while two clicks did
+nothing at all.
 
 The header carries signal strength and a duty-cycle bar that only draws
 attention once the hour's budget is running low.
