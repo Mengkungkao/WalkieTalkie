@@ -127,13 +127,16 @@ def check_and_warn(m0: int = DEFAULT_M0, m1: int = DEFAULT_M1) -> dict:
                  "the module's M0/M1")
         return result
 
+    stuck = [pin for pin, level in ((m0, result["levels"][0]),
+                                    (m1, result["levels"][1])) if level]
     log.error(
-        "THE RADIO IS DEAF: %s. GPIO %d/%d are the module's M0/M1 and also "
-        "two Whisplay LCD control lines, so the display is choosing the "
-        "radio's mode. Nothing will be sent or received, though the log "
-        "will still say packets were sent. Fix: remove the M0/M1 jumpers "
-        "on the LoRa HAT, or rewire them to free pins and set "
-        "radio.mode_pins in config.yaml.",
+        "THE RADIO IS DEAF: %s. M0=GPIO%d M1=GPIO%d, and %s not going low. "
+        "Nothing will be sent or received, though the log will still say "
+        "packets were sent. Either something else is holding that line "
+        "(the LCD drives GPIO 22/27, so a fitted M0/M1 jumper does exactly "
+        "this), or the pin cannot sink it -- move that wire to another free "
+        "GPIO and update radio.mode_pins, or tie the pin to ground.",
         result["detail"], m0, m1,
+        " and ".join(f"GPIO{p}" for p in stuck) + (" is" if len(stuck) == 1 else " are"),
     )
     return result

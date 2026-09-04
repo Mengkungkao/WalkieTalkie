@@ -66,10 +66,14 @@ def main() -> int:
         print(f"could not list apps: {exc}", file=sys.stderr)
         return 1
 
-    for app in listing:
-        if app.get("app_id") == APP_ID and app.get("running"):
-            print("already running; nothing to do")
-            return 0
+    running = any(a.get("app_id") == APP_ID and a.get("running")
+                  for a in listing)
+    # Ask regardless. "running" can be stale -- the daemon only notices a
+    # dead child on its next poll, so a launcher that skipped on this flag
+    # silently did nothing after a restart and left the radio down. When
+    # the app really is running the daemon just grants it focus, which is
+    # exactly what picking it on the desktop does.
+    print("already running; asking for focus" if running else "launching")
 
     try:
         reply = request("app.launch", {"app_id": APP_ID})
