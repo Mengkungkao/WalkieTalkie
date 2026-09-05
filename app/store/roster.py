@@ -27,7 +27,9 @@ from app.utils.logger import get_logger
 
 log = get_logger("roster")
 
-BROADCAST_NAME = "ALL STATIONS"
+# Short on purpose: at 15 px bold, "ALL STATIONS" crowded the row and
+# left no space for the address and last-heard line beside it.
+BROADCAST_NAME = "ALL"
 ROSTER_FILE = "roster.json"
 
 

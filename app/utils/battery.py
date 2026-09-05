@@ -64,6 +64,16 @@ class Battery:
             return None
         return (capacity_mah * self.percent / 100.0) / abs(self.milliamps)
 
+    def compact(self) -> str:
+        """Short enough for a status row: charge and time, nothing else."""
+        if not self.present:
+            return "external power"
+        if self.charging:
+            return f"{self.percent:.0f}%  charging"
+        hours = self.hours_left()
+        return (f"{self.percent:.0f}%  ~{hours:.1f}h left" if hours is not None
+                else f"{self.percent:.0f}%")
+
     def summary(self) -> str:
         if not self.present:
             return "no battery"

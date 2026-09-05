@@ -866,7 +866,8 @@ class WalkieApp:
 
         power = self.battery.poll()
         self.state.battery_present = power.present
-        self.state.battery_summary = power.summary()
+        self.state.battery_summary = power.compact()
+        self.state.battery_detail = power.summary()
         self.state.battery_percent = power.percent
         self.state.battery_low = power.low
         if power.critical and not self._warned_critical:

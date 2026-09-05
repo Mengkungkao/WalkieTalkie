@@ -106,4 +106,6 @@ def diagnose(preferred_card: str | None = None) -> str:
         return next((name for i, name in cards if i == index), None)
 
     mic, speaker = chosen(capture), chosen(playback)
+    if mic and mic == speaker:
+        return mic
     return f"mic {mic or 'NONE'} / spk {speaker or 'NONE'}"

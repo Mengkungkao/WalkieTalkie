@@ -192,3 +192,56 @@ def test_frame_is_the_size_the_daemon_expects(display):
     screens.render(display, populated_state(screen=CONTACTS))
     frame = display.board.frames[-1]
     assert len(frame) == theme.SCREEN_WIDTH * theme.SCREEN_HEIGHT * 2 == 134_400
+
+
+# --- layout: nothing may reach the footer -----------------------------
+def _bottom_of_drawn_content(image):
+    """Lowest row with any non-background pixel, ignoring the footer band."""
+    import numpy as np
+
+    from app.ui import screens as scr
+
+    arr = np.asarray(image.convert("RGB"))
+    background = np.array(theme.BG, dtype=arr.dtype)
+    painted = (arr != background).any(axis=2)
+    rows = np.where(painted[:scr.FOOTER_Y - 2].any(axis=1))[0]
+    return int(rows[-1]) if rows.size else 0
+
+
+@pytest.mark.parametrize("screen", [CONTACTS, INBOX, STATUS, SETTINGS])
+def test_content_never_reaches_the_footer(display, screen):
+    """The status screen used to print three rows through the hints."""
+    from app.ui import screens as scr
+
+    state = populated_state(screen=screen, settings_items=SETTINGS_ITEMS,
+                            battery_present=True, battery_percent=93.9,
+                            battery_summary="94%  ~2.3h left",
+                            radio_note="transparent mode",
+                            audio_note="whisplaysound")
+    image, draw = display.new_canvas()
+    scr.RENDERERS[screen](draw, state)
+    bottom = _bottom_of_drawn_content(image)
+    assert bottom < scr.CONTENT_BOTTOM + 4, (
+        f"{screen} draws down to y={bottom}, past CONTENT_BOTTOM="
+        f"{scr.CONTENT_BOTTOM}")
+
+
+def test_the_broadcast_entry_is_short_enough_for_its_row():
+    """"ALL STATIONS" crowded out the address and last-heard line."""
+    from PIL import Image, ImageDraw
+
+    from app.store.roster import BROADCAST_NAME
+
+    draw = ImageDraw.Draw(Image.new("RGB", (240, 280)))
+    width = draw.textlength(BROADCAST_NAME, font=theme.font(15, "bold"))
+    assert width <= 90, f"{BROADCAST_NAME!r} is {width:.0f}px"
+
+
+def test_mains_power_is_shown_rather_than_left_blank(display):
+    """A base station on mains should say so, not show an empty gap."""
+    state = populated_state(battery_present=False)
+    image, draw = display.new_canvas()
+    screens.draw_header(draw, state, "MengPi")
+    arr = image.crop((196, 6, 232, 24)).convert("RGB").getcolors(4096)
+    assert any(colour != theme.SURFACE and count < 600 for count, colour in arr), \
+        "nothing drawn where the power indicator belongs"

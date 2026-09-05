@@ -35,6 +35,16 @@ PLAYING = "playing"
 HEADER_HEIGHT = 30
 FOOTER_Y = 244
 
+# The usable band between header and footer. Everything draws inside it:
+# the status screen used to run 25 px past the footer and print its last
+# three rows straight through the gesture hints.
+CONTENT_TOP = HEADER_HEIGHT + 6
+CONTENT_BOTTOM = FOOTER_Y - 6
+CONTENT_HEIGHT = CONTENT_BOTTOM - CONTENT_TOP
+
+# Shared margins, so columns line up between screens.
+MARGIN = 8
+
 
 @dataclass
 class ViewState:
@@ -77,6 +87,7 @@ class ViewState:
 
     battery_present: bool = False
     battery_summary: str = ""
+    battery_detail: str = ""
     battery_percent: float | None = None
     battery_low: bool = False
 
@@ -131,23 +142,32 @@ def draw_header(draw, state: ViewState, title: str):
     # then how long you can keep reaching.
     signal_bars(draw, 144, 9, state.last_rssi)
 
+    x, y, width, height = 172, 10, 22, 11
+    draw.rounded_rectangle([x, y, x + width, y + height], radius=2,
+                           outline=theme.BORDER)
+    draw.rectangle([x + width + 1, y + 3, x + width + 3, y + height - 3],
+                   fill=theme.BORDER)
+
     if state.battery_present and state.battery_percent is not None:
         fraction = max(0.0, min(1.0, state.battery_percent / 100.0))
         colour = (theme.DANGER if state.battery_low else
                   theme.WARN if fraction < 0.4 else theme.OK)
-        x, y, width, height = 174, 10, 22, 11
-        draw.rounded_rectangle([x, y, x + width, y + height], radius=2,
-                               outline=theme.BORDER)
-        draw.rectangle([x + width + 1, y + 3, x + width + 3, y + height - 3],
-                       fill=theme.BORDER)
         if fraction > 0.02:
             draw.rectangle([x + 2, y + 2,
                             x + 2 + int((width - 4) * fraction), y + height - 2],
                            fill=colour)
         # A bar answers "roughly?"; the number answers "will this last
         # the walk back?".
-        draw.text((203, 9), f"{state.battery_percent:.0f}%",
+        draw.text((200, 9), f"{state.battery_percent:.0f}%",
                   font=theme.font(11), fill=colour)
+    else:
+        # No battery is not nothing to say -- it means mains, which is
+        # what you want to know about a base station. Blank space would
+        # read as a missing reading instead.
+        draw.polygon([(x + 13, y + 2), (x + 8, y + 6), (x + 11, y + 6),
+                      (x + 9, y + 10), (x + 16, y + 5), (x + 12, y + 5)],
+                     fill=theme.ACCENT)
+        draw.text((200, 9), "EXT", font=theme.font(11), fill=theme.ACCENT)
 
     # Duty-cycle pressure: a thin bar that only earns attention when high.
     if state.duty_fraction > 0.01:
@@ -177,15 +197,18 @@ def draw_contacts(draw, state: ViewState):
         centred(draw, 130, "no contacts", theme.font(15), theme.TEXT_DIM)
         return
 
-    visible = 5
     row_height = 38
+    # One row of headroom is kept for the "n / m" counter when the list
+    # is longer than the screen.
+    visible = min(len(state.entries), (CONTENT_HEIGHT - 14) // row_height)
+    visible = max(1, visible)
     first = max(0, min(state.selected_index - visible // 2,
                        len(state.entries) - visible))
     first = max(0, first)
 
     for offset, entry in enumerate(state.entries[first:first + visible]):
         index = first + offset
-        top = HEADER_HEIGHT + 8 + offset * row_height
+        top = CONTENT_TOP + offset * row_height
         chosen = index == state.selected_index
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + row_height - 6],
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
@@ -214,22 +237,31 @@ def draw_contacts(draw, state: ViewState):
         else:
             draw.ellipse(box, outline=dot, width=2)
 
+        # The name shares the row with the signal reading on the right,
+        # so it gets the width that is actually left over.
+        rssi_text = "" if entry.last_rssi is None else f"{entry.last_rssi}"
+        small = theme.font(11)
+        rssi_width = (int(draw.textlength(rssi_text, font=small)) + 10
+                      if rssi_text else 0)
+        text_width = theme.SCREEN_WIDTH - 32 - MARGIN - 6 - rssi_width
+
         name_font = theme.font(15, "bold" if chosen else "regular")
-        draw.text((32, top + 5),
-                  ellipsise(draw, entry.name, name_font, 150),
+        draw.text((32, top + 4),
+                  ellipsise(draw, entry.name, name_font, text_width),
                   font=name_font, fill=theme.TEXT if chosen else theme.TEXT_DIM)
         detail = entry.status if entry.is_broadcast else \
             f"{entry.address} · {entry.status}"
-        draw.text((32, top + 20), detail, font=theme.font(11),
-                  fill=theme.TEXT_FAINT)
+        draw.text((32, top + 20),
+                  ellipsise(draw, detail, small, text_width),
+                  font=small, fill=theme.TEXT_FAINT)
 
-        if entry.last_rssi is not None:
-            draw.text((theme.SCREEN_WIDTH - 52, top + 11),
-                      f"{entry.last_rssi}", font=theme.font(11),
+        if rssi_text:
+            draw.text((theme.SCREEN_WIDTH - MARGIN - 6 - rssi_width + 10,
+                       top + 11), rssi_text, font=small,
                       fill=theme.rssi_colour(entry.last_rssi))
 
     if len(state.entries) > visible:
-        centred(draw, HEADER_HEIGHT + 8 + visible * row_height - 2,
+        centred(draw, CONTENT_TOP + visible * row_height,
                 f"{state.selected_index + 1} / {len(state.entries)}",
                 theme.font(11), theme.TEXT_FAINT)
 
@@ -252,8 +284,10 @@ def draw_talk(draw, state: ViewState):
         # Inner disc grows with voice level: instant proof the mic is live.
         inner = int(12 + state.record_level * (radius - 20))
         draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], fill=colour)
-        centred(draw, cy + radius + 10, f"{state.record_seconds:.1f}s",
-                theme.font(20, "bold"), theme.TEXT)
+        # Inside the ring, not under it: at 20 px this used to be drawn
+        # straight through the level meter below.
+        centred(draw, cy + radius + 8, f"{state.record_seconds:.1f}s",
+                theme.font(16, "bold"), theme.TEXT)
     elif state.radio_state == SENDING:
         fraction = state.tx_sent / state.tx_total if state.tx_total else 0.0
         centred(draw, cy - 14, f"{int(fraction * 100)}%",
@@ -276,13 +310,13 @@ def draw_talk(draw, state: ViewState):
     centred(draw, 42, label, theme.font(14, "bold"), colour)
 
 
-    # Level or progress bar under the disc.
-    bar = [24, 186, theme.SCREEN_WIDTH - 24, 198]
+    # Level or progress bar under the disc, clear of the timer above it.
+    bar = [24, 192, theme.SCREEN_WIDTH - 24, 202]
     if state.radio_state == RECORDING:
         vu_meter(draw, bar, state.record_level)
         remaining = state.max_record_seconds - state.record_seconds
         if remaining <= 5:
-            centred(draw, 204, f"{remaining:.0f}s left",
+            centred(draw, 208, f"{remaining:.0f}s left",
                     theme.font(12, "bold"), theme.WARN)
     elif state.radio_state == SENDING:
         meter(draw, bar,
@@ -309,12 +343,16 @@ def draw_talk(draw, state: ViewState):
                 "rejected": ("refused the link", theme.DANGER),
                 "stale": ("not heard recently", theme.WARN),
             }.get(link, ("not connected — open Talk to call", theme.TEXT_FAINT))
-        centred(draw, 188, detail, theme.font(12), colour)
+        centred(draw, 194, detail, theme.font(12), colour)
 
     if state.queued:
-        centred(draw, 220, f"{state.queued} queued", theme.font(11), theme.WARN)
-    elif state.duty_remaining < 5 and state.duty_fraction > 0:
-        centred(draw, 220, f"duty cycle: {state.duty_remaining:.0f}s left",
+        centred(draw, 222, f"{state.queued} queued", theme.font(11), theme.WARN)
+    elif state.duty_fraction > 0.85:
+        # Only when the hour's airtime is nearly spent. The old test fired
+        # whenever duty_remaining happened to be zero, which is its
+        # starting value -- so a fresh radio warned that it was out of
+        # airtime before it had sent anything.
+        centred(draw, 222, f"airtime {state.duty_fraction * 100:.0f}% used",
                 theme.font(11), theme.WARN)
 
     draw_footer(draw, state, _hints(TALK))
@@ -330,14 +368,14 @@ def draw_inbox(draw, state: ViewState):
         draw_footer(draw, state, _hints(INBOX, inbox_empty=True))
         return
 
-    visible = 5
     row_height = 40
+    visible = max(1, min(len(state.inbox), CONTENT_HEIGHT // row_height))
     first = max(0, min(state.inbox_index - visible // 2, len(state.inbox) - visible))
     first = max(0, first)
 
     for offset, item in enumerate(state.inbox[first:first + visible]):
         index = first + offset
-        top = HEADER_HEIGHT + 6 + offset * row_height
+        top = CONTENT_TOP + offset * row_height
         chosen = index == state.inbox_index
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + row_height - 6],
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
@@ -350,14 +388,18 @@ def draw_inbox(draw, state: ViewState):
                           theme.SCREEN_WIDTH - 14, top + 16], fill=theme.OK)
 
         who = ("to " if item.outgoing else "") + (item.peer_name or f"node {item.src}")
-        draw.text((18, top + 4), ellipsise(draw, who, theme.font(13, "bold"), 150),
+        small = theme.font(10)
+        when_width = int(draw.textlength(item.when, font=small)) + 8
+        text_width = theme.SCREEN_WIDTH - 18 - MARGIN - when_width
+        draw.text((18, top + 4),
+                  ellipsise(draw, who, theme.font(13, "bold"), text_width),
                   font=theme.font(13, "bold"), fill=theme.TEXT)
         draw.text((18, top + 20),
-                  ellipsise(draw, item.summary, theme.font(11), 150),
+                  ellipsise(draw, item.summary, theme.font(11), text_width),
                   font=theme.font(11),
                   fill=theme.WARN if item.incomplete else theme.TEXT_DIM)
-        draw.text((theme.SCREEN_WIDTH - 52, top + 21), item.when,
-                  font=theme.font(10), fill=theme.TEXT_FAINT)
+        draw.text((theme.SCREEN_WIDTH - MARGIN - when_width + 8, top + 21),
+                  item.when, font=small, fill=theme.TEXT_FAINT)
 
     draw_footer(draw, state, _hints(INBOX))
 
@@ -366,41 +408,64 @@ def draw_inbox(draw, state: ViewState):
 def draw_status(draw, state: ViewState):
     draw_header(draw, state, "STATUS")
 
-    rows = [
-        ("callsign", state.callsign or "-"),
-        ("address", str(state.address)),
-        ("frequency", f"{state.frequency_mhz} MHz"),
-        ("codec", f"codec2 {state.codec_name}"),
-        ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
-        ("link", "connected" if state.target_linked else "not connected"),
-        ("mode pins", state.radio_note or "not checked"),
-        ("battery", state.battery_summary or "no battery"),
-        ("backlight", "pinned 100% (shares the radio's M0)"
-                      if state.brightness_locked else "auto-dims when idle"),
-        ("last rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
-        ("duty cycle", f"{state.duty_fraction * 100:.0f}% used"
-                       f"  ({state.duty_remaining:.0f}s left)"),
-    ]
     stats = state.stats or {}
-    rows.append(("packets", f"tx {stats.get('packets_tx', 0)}  "
-                            f"rx {stats.get('packets_rx', 0)}"))
-    rows.append(("dropped", str(stats.get('frames_dropped', 0))))
+    power = state.battery_summary if state.battery_present else "external power"
 
-    top = HEADER_HEIGHT + 8
-    for index, (label, value) in enumerate(rows):
-        y = top + index * 21
-        draw.text((12, y), label, font=theme.font(11), fill=theme.TEXT_FAINT)
-        colour = theme.TEXT
-        if label == "audio" and not state.audio_ok:
-            colour = theme.DANGER
-        elif label == "mode pins" and state.radio_deaf:
-            colour = theme.DANGER
-        elif label == "link":
-            colour = theme.OK if state.target_linked else theme.TEXT_DIM
-        elif label == "battery" and state.battery_low:
-            colour = theme.DANGER
-        draw.text((96, y - 1), ellipsise(draw, value, theme.font(12), 134),
-                  font=theme.font(12), fill=colour)
+    # Grouped, because eleven flat rows read as a wall. The group headings
+    # cost a line each and make the screen scannable instead.
+    groups = [
+        ("STATION", [
+            ("call", state.callsign or "-"),
+            ("addr", str(state.address)),
+            ("freq", f"{state.frequency_mhz} MHz  ·  codec2 {state.codec_name}"),
+        ]),
+        ("LINK", [
+            ("peer", "connected" if state.target_linked else "not connected"),
+            ("rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
+            ("duty", f"{state.duty_fraction * 100:.0f}% of the hour used"),
+            ("pkts", f"tx {stats.get('packets_tx', 0)}   "
+                     f"rx {stats.get('packets_rx', 0)}   "
+                     f"lost {stats.get('frames_dropped', 0)}"),
+        ]),
+        ("HARDWARE", [
+            ("mode", state.radio_note or "not checked"),
+            ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
+            ("power", power),
+        ]),
+    ]
+
+    label_font = theme.font(10)
+    value_font = theme.font(11)
+    head_font = theme.font(9, "bold")
+    value_x = 58
+    value_width = theme.SCREEN_WIDTH - value_x - MARGIN
+
+    y = CONTENT_TOP
+    for heading, rows in groups:
+        if y + 12 > CONTENT_BOTTOM:
+            break
+        draw.text((MARGIN, y), heading, font=head_font, fill=theme.TEXT_FAINT)
+        draw.line([MARGIN + 62, y + 4, theme.SCREEN_WIDTH - MARGIN, y + 4],
+                  fill=theme.SURFACE_HI)
+        y += 13
+        for label, value in rows:
+            if y + 13 > CONTENT_BOTTOM:
+                break
+            colour = theme.TEXT
+            if label == "audio" and not state.audio_ok:
+                colour = theme.DANGER
+            elif label == "mode" and state.radio_deaf:
+                colour = theme.DANGER
+            elif label == "peer":
+                colour = theme.OK if state.target_linked else theme.TEXT_DIM
+            elif label == "power" and state.battery_low:
+                colour = theme.DANGER
+            draw.text((MARGIN + 4, y + 1), label, font=label_font,
+                      fill=theme.TEXT_FAINT)
+            draw.text((value_x, y), ellipsise(draw, value, value_font, value_width),
+                      font=value_font, fill=colour)
+            y += 14
+        y += 4
 
     draw_footer(draw, state, _hints(STATUS))
 
@@ -424,15 +489,16 @@ def draw_settings(draw, state: ViewState):
         centred(draw, 130, "no settings", theme.font(15), theme.TEXT_DIM)
         return
 
-    visible = 5
     row_height = 38
+    visible = max(1, min(len(state.settings_items),
+                         (CONTENT_HEIGHT - 14) // row_height))
     first = max(0, min(state.settings_index - visible // 2,
                        len(state.settings_items) - visible))
     first = max(0, first)
 
     for offset, item in enumerate(state.settings_items[first:first + visible]):
         index = first + offset
-        top = HEADER_HEIGHT + 8 + offset * row_height
+        top = CONTENT_TOP + offset * row_height
         chosen = index == state.settings_index
         # Destructive entries are tinted so they are never opened by reflex.
         accent = theme.DANGER if item.get("destructive") else theme.ACCENT
@@ -440,20 +506,21 @@ def draw_settings(draw, state: ViewState):
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
               outline=accent if chosen else None)
 
+        text_width = theme.SCREEN_WIDTH - 16 - MARGIN - 8
         name_font = theme.font(14, "bold" if chosen else "regular")
-        draw.text((16, top + 5),
-                  ellipsise(draw, item["label"], name_font, 200),
+        draw.text((16, top + 4),
+                  ellipsise(draw, item["label"], name_font, text_width),
                   font=name_font,
                   fill=(theme.DANGER if item.get("destructive")
                         else (theme.TEXT if chosen else theme.TEXT_DIM)))
         value = str(item.get("value", ""))
         if value:
             draw.text((16, top + 20),
-                      ellipsise(draw, value, theme.font(11), 200),
+                      ellipsise(draw, value, theme.font(11), text_width),
                       font=theme.font(11), fill=theme.TEXT_FAINT)
 
     if len(state.settings_items) > visible:
-        centred(draw, HEADER_HEIGHT + 8 + visible * row_height - 2,
+        centred(draw, CONTENT_TOP + visible * row_height,
                 f"{state.settings_index + 1} / {len(state.settings_items)}",
                 theme.font(11), theme.TEXT_FAINT)
 
