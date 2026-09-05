@@ -29,9 +29,18 @@ class RadioSettings:
     power_dbm: int = 22
     uart_baud: int = 9600
     duty_cycle_percent: float = 1.0
-    # M0/M1. Left unset because GPIO 22 and 27 belong to the Whisplay LCD;
-    # only fill this in if the mode pins have been rewired to free lines.
+    # Pins the app should actively drive to select the module's mode.
+    # Left unset because GPIO 22 and 27 belong to the Whisplay LCD: the
+    # daemon holds them through gpiod, so claiming them throws and the
+    # radio fails to open at all. Fill this in only once M0/M1 have been
+    # rewired to free lines.
     mode_pins: list | None = None
+    # Where M0/M1 are *physically* connected, whether or not we drive
+    # them. With the LoRa HAT's stock jumpers that is the LCD's backlight
+    # and data/command lines, which is what makes the module deaf and
+    # what pins the backlight on. Kept separate from mode_pins because
+    # the conflict exists even when the app never touches the pins.
+    wired_mode_pins: list = field(default_factory=lambda: [22, 27])
 
 
 @dataclass

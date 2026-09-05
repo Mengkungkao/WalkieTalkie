@@ -22,7 +22,11 @@ radio:
   # M0/M1. Leave null: GPIO 22 and 27 belong to the Whisplay LCD, and
   # the module is configured once by provision_radio.py instead. Fill in
   # [m0, m1] only if you rewired the mode pins to free GPIOs.
+  # Pins to actively drive. Leave null with the stock jumpers: GPIO 22/27
+  # belong to the LCD and claiming them makes the radio fail to open.
   mode_pins: null
+  # Where M0/M1 physically are, whether or not we drive them.
+  wired_mode_pins: [22, 27]
 
 identity:
   callsign: whisplay

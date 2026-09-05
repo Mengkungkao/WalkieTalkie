@@ -31,8 +31,7 @@ from app.audio import devices as audio_devices
 from app.audio.capture import Recorder
 from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
                               NAME_BY_MODE, SAMPLE_RATE)
-from app.audio.playback import (CUE_ERROR, CUE_RX, CUE_TX_DONE, CUE_TX_START,
-                                Player)
+from app.audio.playback import CUE_ERROR, Player, cues_for, voice_for
 from app.config import settings as settings_module
 from app.config.settings import Contact
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE, GestureDetector
@@ -123,6 +122,21 @@ class WalkieApp:
             settings.audio.playback_device, "playback", settings.audio.preferred_card)
         self.recorder = Recorder(capture_device, settings.audio.max_record_seconds)
         self.player = Player(playback_device)
+
+        # This station's own sound. Beeps identify who as well as what,
+        # which matters when two identical Pis sit on the same desk.
+        self.cues = cues_for(settings.radio.address, settings.identity.callsign)
+        clashing = [c.name for c in settings.contacts
+                    if c.address != settings.radio.address
+                    and voice_for(c.address) == self.cues.pitch]
+        if clashing:
+            log.warning(
+                "%s share this station's cue pitch (%d Hz), so their beeps "
+                "will sound identical to ours; change one address to separate "
+                "them", ", ".join(clashing), self.cues.pitch,
+            )
+        log.info("cue pitch %d Hz for %s (address %d)",
+                 self.cues.pitch, settings.identity.callsign, settings.radio.address)
         self._refresh_audio_state()
 
         # --- radio ------------------------------------------------------
@@ -157,7 +171,11 @@ class WalkieApp:
         # The module is deaf unless M0/M1 are both low, and on this
         # hardware the LCD drives those pins. Say so rather than letting
         # every transmission succeed into nothing.
-        pins = tuple(mode_pins) if mode_pins else (22, 27)
+        # Check and report on where the pins physically are, not on which
+        # ones we drive: with the stock jumpers we drive none of them and
+        # the module is still at the LCD's mercy.
+        wired = radio_settings.wired_mode_pins or [22, 27]
+        pins = tuple(wired)[:2]
 
         # The backlight pin doubles as the module's M0 on this stack, and
         # dimming it is PWM -- which would toggle the radio's mode a
@@ -540,7 +558,7 @@ class WalkieApp:
             return
         if any(c.address == address for c in self.settings.contacts):
             self.state.flash("that is a contact's ID", 4.0)
-            self.player.cue(CUE_ERROR)
+            self.player.cue(self.cues.error)
             return
         self.overrides.set("radio", "address", address)
         self.settings.radio.address = address
@@ -559,7 +577,7 @@ class WalkieApp:
     def _apply_add_device(self, address: int):
         if address == self.settings.radio.address:
             self.state.flash("that is this device's ID", 4.0)
-            self.player.cue(CUE_ERROR)
+            self.player.cue(self.cues.error)
             return
         name = f"node {address}"
         if self.overrides.add_contact(name, address):
@@ -608,7 +626,7 @@ class WalkieApp:
             return
         if not self.recorder.available or self.codec is None:
             self.state.flash(self.state.audio_note or "no microphone", 3.0)
-            self.player.cue(CUE_ERROR)
+            self.player.cue(self.cues.error)
             self._wake.set()
             return
 
@@ -633,7 +651,7 @@ class WalkieApp:
         duration = len(pcm) / 2 / SAMPLE_RATE
         if duration < MIN_TALK_SECONDS or not pcm:
             self.state.flash("too short")
-            self.player.cue(CUE_ERROR)
+            self.player.cue(self.cues.error)
             self._wake.set()
             return
 
@@ -653,7 +671,7 @@ class WalkieApp:
         except Exception:
             log.exception("codec2 encode failed")
             self.state.flash("encode failed")
-            self.player.cue(CUE_ERROR)
+            self.player.cue(self.cues.error)
             self._wake.set()
             return
 
@@ -667,14 +685,14 @@ class WalkieApp:
         airtime = self.link.budget.estimate_message(len(encoded) + packets * 11)
         if self.link.budget.remaining_seconds() < airtime:
             self.state.flash("duty cycle full", 4.0)
-            self.player.cue(CUE_ERROR)
+            self.player.cue(self.cues.error)
             self._wake.set()
             return
 
         self.state.radio_state = SENDING
         self.state.tx_sent, self.state.tx_total = 0, packets
         if self.settings.audio.cues:
-            self.player.cue(CUE_TX_START)
+            self.player.cue(self.cues.tx_start)
         self.display.set_led(theme.LED_TX)
         self._wake.set()
 
@@ -786,7 +804,9 @@ class WalkieApp:
             self.display.set_led(theme.LED_RX)
             self._wake.set()
             if self.settings.audio.cues:
-                self.player.play(CUE_RX)
+                # The *sender's* pitch, so you know who is calling before
+                # a word is decoded.
+                self.player.play(cues_for(item.src).rx)
             self.player.play(pcm)
             self.inbox.mark_played(item)
             self.state.unread = self.inbox.unread
@@ -804,7 +824,7 @@ class WalkieApp:
             self.state.radio_state = IDLE
             self.display.set_led(theme.LED_IDLE)
             if self.settings.audio.cues:
-                self.player.cue(CUE_TX_DONE)
+                self.player.cue(self.cues.tx_done)
             self.state.flash("sent")
         self._wake.set()
 

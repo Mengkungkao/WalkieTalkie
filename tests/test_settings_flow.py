@@ -12,6 +12,7 @@ import datetime
 
 import pytest
 
+from app.audio.playback import cues_for
 from app.config.settings import Contact, Settings
 from app.main import WalkieApp
 from app.store.overrides import Overrides
@@ -60,6 +61,7 @@ def app(tmp_path):
     instance.roster = Roster(settings.contacts, tmp_path)
     instance.inbox = FakeInbox()
     instance.player = FakePlayer()
+    instance.cues = cues_for(settings.radio.address, settings.identity.callsign)
     instance.state = ViewState(address=settings.radio.address)
     instance.display = FakeDisplay()
     instance._wake = type("Event", (), {"set": lambda self: None})()

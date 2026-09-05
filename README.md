@@ -329,6 +329,29 @@ attention once the hour's budget is running low.
 
 ---
 
+## Telling the radios apart by ear
+
+Two identical Pis on one desk raise the same question every time
+something beeps: was that mine or theirs? Each station has its own
+pitch, drawn from a pentatonic ladder so any two are clearly different
+and no pair beats against the other.
+
+| | sounds |
+|---|---|
+| your transmission starting | one note, **your** pitch |
+| your transmission sent | rising pair, your pitch |
+| an incoming message | falling pair, the **sender's** pitch |
+| an error | a low buzz, the same for everyone |
+
+Pattern carries the meaning and pitch carries the identity, so "rising
+means I am sending" is learned once and then tells you *which* radio did
+it. An incoming call announces who is calling before a word is decoded.
+
+The pitch comes from the node address, so changing Device ID changes the
+sound. With more than eight stations two will eventually share a pitch;
+the app checks its contacts at startup and says so rather than letting
+the feature quietly stop working.
+
 ## Connecting two radios
 
 Hearing a station does not prove it hears you, and a one-way link is the

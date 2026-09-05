@@ -31,10 +31,59 @@ def tone(frequency: float, seconds: float, volume: float = 0.25) -> bytes:
     return bytes(out)
 
 
-# Distinct cues so the operator can work the radio without watching it.
-CUE_TX_START = tone(880, 0.08)
-CUE_TX_DONE = tone(1320, 0.10)
-CUE_RX = tone(660, 0.07) + bytes(400) + tone(990, 0.09)
+# Each station gets its own pitch, so the beeps say *who* as well as
+# *what*. With two identical Pis on a desk, "was that mine or theirs?" is
+# a real question, and the answer should not require looking at a screen.
+#
+# The pitches are a pentatonic ladder: any two are clearly different by
+# ear, and no pair beats against the other. Eight is plenty -- more would
+# start to sound alike, which defeats the point.
+VOICES = (523, 587, 659, 784, 880, 1047, 1175, 1319)
+
+
+def voice_for(address: int) -> int:
+    """The pitch that identifies this station."""
+    return VOICES[int(address) % len(VOICES)]
+
+
+class CueSet:
+    """The four sounds one station makes, all built from its own pitch.
+
+    Patterns carry the meaning and pitch carries the identity, so a
+    listener learns "rising means I am transmitting" once and then hears
+    which radio did it without relearning anything.
+    """
+
+    def __init__(self, address: int, name: str = ""):
+        self.address = int(address)
+        self.name = name
+        self.pitch = voice_for(address)
+        high = int(self.pitch * 1.5)      # a fifth above
+
+        self.tx_start = tone(self.pitch, 0.07)
+        self.tx_done = tone(self.pitch, 0.06) + bytes(320) + tone(high, 0.08)
+        # Descending, so an incoming call never sounds like your own
+        # transmission finishing.
+        self.rx = tone(high, 0.07) + bytes(320) + tone(self.pitch, 0.09)
+        # Deliberately not pitched: an error is an error whoever made it.
+        self.error = tone(300, 0.18)
+
+    def __repr__(self):
+        return f"<CueSet {self.name or self.address} at {self.pitch} Hz>"
+
+
+_cue_cache = {}
+
+
+def cues_for(address: int, name: str = "") -> CueSet:
+    """Cached, because building the tones costs a few milliseconds."""
+    if address not in _cue_cache:
+        _cue_cache[address] = CueSet(address, name)
+    return _cue_cache[address]
+
+
+# Kept for callers with no station in hand -- an error before the radio
+# is even open, say.
 CUE_ERROR = tone(300, 0.18)
 
 
