@@ -158,6 +158,19 @@ class WalkieApp:
         # hardware the LCD drives those pins. Say so rather than letting
         # every transmission succeed into nothing.
         pins = tuple(mode_pins) if mode_pins else (22, 27)
+
+        # The backlight pin doubles as the module's M0 on this stack, and
+        # dimming it is PWM -- which would toggle the radio's mode a
+        # thousand times a second. Hearing beats saving the backlight, so
+        # brightness is pinned and the idle policy stands down.
+        if modepins.conflicts_with_backlight(pins):
+            self.display.lock_brightness(
+                f"GPIO{modepins.WHISPLAY_BACKLIGHT_BCM} is both the LCD "
+                "backlight and the radio's M0; dimming it is PWM and would "
+                "deafen the radio"
+            )
+            self.state.brightness_locked = True
+
         health = modepins.check_and_warn(*pins)
         self.state.radio_deaf = health["readable"] and not health["transparent"]
         self.state.radio_note = health.get("detail", "")

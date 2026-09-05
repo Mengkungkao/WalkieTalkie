@@ -407,6 +407,37 @@ contact that shares this node's address at startup, counts and explains
 the dropped packets, and `deploy.sh` no longer copies `config.yaml`
 between devices — which used to hand every node the same identity.
 
+## The backlight is also the radio's M0
+
+With the LoRa HAT's stock M0/M1 jumpers fitted, the two boards share two
+lines. Whisplay's source numbers pins in BOARD mode, which is why this is
+easy to miss:
+
+| Whisplay | BOARD | BCM | Function | LoRa |
+|---|---|---|---|---|
+| `LED_PIN` | 15 | **22** | LCD backlight | **M0** |
+| `DC_PIN` | 13 | **27** | LCD data/command | **M1** |
+
+The backlight is **active-low and dimmed by 1 kHz PWM**
+(`duty_cycle = 100 - brightness`), so:
+
+| Backlight | BCM 22 | M0 | Radio |
+|---|---|---|---|
+| 100% | steady low | 0 | **transparent — works** |
+| 0% | steady high | 1 | wrong mode — deaf |
+| anything between | PWM at 1 kHz | toggling | mode thrashing |
+
+So on this stack **hearing costs the screen**: the app pins brightness at
+100% and stands the idle policy down, saying so on the Status screen. It
+detects the clash from `radio.mode_pins`, so rewiring the mode pins to
+free GPIOs brings the dimming — and the power saving — straight back.
+
+`DC_PIN` is the other half, and only Whisplay can fix it: `_send_data`
+and `_send_data_bytes` raise DC and never lower it, so after any frame
+flush BCM 27 rests high and the module sits in configuration mode. Ending
+each data transfer with DC low costs one GPIO write and is invisible to
+the display, which only samples DC while SPI is clocking.
+
 ## Power
 
 The Pi Zero 2 W is expected to run from a battery, so idle cost is a

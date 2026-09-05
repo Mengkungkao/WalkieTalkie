@@ -39,6 +39,25 @@ GPLEV0 = 0x34
 DEFAULT_M0 = 22
 DEFAULT_M1 = 27
 
+# The Whisplay HAT drives these same two lines. Its source numbers pins in
+# BOARD mode, which is why the collision is easy to miss:
+#
+#   LED_PIN = 15 (BOARD) -> BCM 22 -> LCD backlight, and the LoRa M0
+#   DC_PIN  = 13 (BOARD) -> BCM 27 -> LCD data/command, and the LoRa M1
+#
+# The backlight is active-low and dimmed by 1 kHz PWM ("duty_cycle =
+# 100 - brightness"), so any brightness between 0 and 100 toggles M0 a
+# thousand times a second and the module thrashes between transparent and
+# wake-on-radio. Only a steady 100% holds M0 low, which is the one state
+# where the radio can hear anything.
+WHISPLAY_BACKLIGHT_BCM = 22
+WHISPLAY_DC_BCM = 27
+
+
+def conflicts_with_backlight(mode_pins) -> bool:
+    """Does driving these mode pins fight the LCD backlight?"""
+    return bool(mode_pins) and WHISPLAY_BACKLIGHT_BCM in tuple(mode_pins)
+
 FUNCTIONS = {0: "input", 1: "output", 4: "alt0", 5: "alt1", 6: "alt2",
              7: "alt3", 3: "alt4", 2: "alt5"}
 

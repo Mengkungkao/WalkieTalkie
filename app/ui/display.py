@@ -128,6 +128,8 @@ class Display:
 
     # --- backlight / idle policy ---------------------------------------
     def set_backlight(self, brightness: int):
+        if self.brightness_locked:
+            brightness = 100
         brightness = max(0, min(100, int(brightness)))
         if brightness == self._backlight:
             return
@@ -136,6 +138,23 @@ class Display:
             self.board.set_backlight(brightness)
         except Exception:
             log.debug("backlight write failed", exc_info=True)
+
+    def lock_brightness(self, reason: str):
+        """Pin the backlight fully on and stop the idle policy touching it.
+
+        Used when the backlight pin doubles as the radio's M0. Dimming
+        works by PWM on that pin, so any brightness between 0 and 100
+        toggles the module's mode a thousand times a second, and 0 leaves
+        it high -- both deafen the radio. Full brightness is the only
+        setting that holds M0 low, so hearing costs the screen.
+        """
+        self._brightness_locked = reason
+        self.set_backlight(100)
+        log.warning("backlight pinned at 100%%: %s", reason)
+
+    @property
+    def brightness_locked(self):
+        return getattr(self, "_brightness_locked", None)
 
     def restore_backlight(self):
         """Return the panel to normal brightness.
@@ -172,6 +191,8 @@ class Display:
         or playing -- the operator is mid-action even if not pressing
         anything.
         """
+        if self.brightness_locked:
+            return
         if keep_awake:
             self.poke()
             return
@@ -183,6 +204,8 @@ class Display:
 
     def next_idle_deadline(self) -> float:
         """Seconds until the backlight next needs changing. inf when settled."""
+        if self.brightness_locked:
+            return float("inf")
         idle = self.idle_seconds()
         for threshold in (self.settings.idle_dim_seconds,
                           self.settings.idle_off_seconds):

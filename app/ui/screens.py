@@ -75,6 +75,8 @@ class ViewState:
     link_states: dict = field(default_factory=dict)
     target_linked: bool = False
 
+    brightness_locked: bool = False
+
     radio_deaf: bool = False
     radio_note: str = ""
 
@@ -347,6 +349,8 @@ def draw_status(draw, state: ViewState):
         ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
         ("link", "connected" if state.target_linked else "not connected"),
         ("mode pins", state.radio_note or "not checked"),
+        ("backlight", "pinned 100% (shares the radio's M0)"
+                      if state.brightness_locked else "auto-dims when idle"),
         ("last rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
         ("duty cycle", f"{state.duty_fraction * 100:.0f}% used"
                        f"  ({state.duty_remaining:.0f}s left)"),
