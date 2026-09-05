@@ -48,7 +48,7 @@ from app.ui.editors import (ChoiceEditor, ClockEditor, ConfirmEditor,
                             DigitEditor)
 from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PLAYING, RECEIVING,
                             RECORDING, SENDING, SETTINGS, TALK, ViewState)
-from app.utils import clock
+from app.utils import battery, clock
 from app.utils.logger import get_logger
 from app.utils.single_instance import AlreadyRunning, SingleInstance
 
@@ -146,6 +146,10 @@ class WalkieApp:
 
         self._playback_lock = threading.Lock()
         self._pending_hello = None
+        # The screen cannot dim on this build -- the backlight pin is the
+        # radio's M0 -- so the charge left is worth showing.
+        self.battery = battery.Monitor()
+        self._warned_critical = False
         self._actions = self._build_actions()
         self._refresh_entries()
 
@@ -850,6 +854,28 @@ class WalkieApp:
             }
         self.state.unread = self.inbox.unread
 
+        # Link state for the contact dots and the Talk screen's warning.
+        self.state.link_states = self._link_states()
+        selected = self.roster.selected()
+        self.state.target_linked = (
+            selected is not None
+            and (selected.is_broadcast
+                 or self.state.link_states.get(selected.address)
+                 == protocol.LINK_LINKED)
+        )
+
+        power = self.battery.poll()
+        self.state.battery_present = power.present
+        self.state.battery_summary = power.summary()
+        self.state.battery_percent = power.percent
+        self.state.battery_low = power.low
+        if power.critical and not self._warned_critical:
+            self._warned_critical = True
+            self.state.flash("battery critical", 8.0)
+            self.player.cue(self.cues.error)
+        elif not power.critical:
+            self._warned_critical = False
+
     def _follow_idle_with_the_microphone(self):
         """Keep the capture stream alive only while the radio is in use.
 
@@ -884,6 +910,10 @@ class WalkieApp:
             deadlines.append(self.settings.power.tick_seconds)
         if self.settings.power.beacon_interval_seconds:
             deadlines.append(max(1.0, self._beacon_due - time.monotonic()))
+        if self.state.battery_present:
+            # A wakeup a minute is nothing against a device drawing half
+            # an amp, and it is exactly when the charge matters.
+            deadlines.append(max(5.0, self.battery.seconds_until_next_poll()))
         soonest = min(deadlines)
         return None if soonest == float("inf") else soonest
 

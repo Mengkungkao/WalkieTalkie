@@ -75,6 +75,11 @@ class ViewState:
     link_states: dict = field(default_factory=dict)
     target_linked: bool = False
 
+    battery_present: bool = False
+    battery_summary: str = ""
+    battery_percent: float | None = None
+    battery_low: bool = False
+
     brightness_locked: bool = False
 
     radio_deaf: bool = False
@@ -119,17 +124,37 @@ def draw_header(draw, state: ViewState, title: str):
     draw.rectangle([0, 0, theme.SCREEN_WIDTH, HEADER_HEIGHT], fill=theme.SURFACE)
     draw.line([0, HEADER_HEIGHT, theme.SCREEN_WIDTH, HEADER_HEIGHT],
               fill=theme.BORDER)
-    draw.text((10, 8), ellipsise(draw, title, theme.font(14, "bold"), 140),
+    draw.text((10, 8), ellipsise(draw, title, theme.font(14, "bold"), 96),
               font=theme.font(14, "bold"), fill=theme.TEXT)
 
-    signal_bars(draw, 196, 9, state.last_rssi)
+    # Right-hand status, ordered like a phone's: how far you can reach,
+    # then how long you can keep reaching.
+    signal_bars(draw, 144, 9, state.last_rssi)
+
+    if state.battery_present and state.battery_percent is not None:
+        fraction = max(0.0, min(1.0, state.battery_percent / 100.0))
+        colour = (theme.DANGER if state.battery_low else
+                  theme.WARN if fraction < 0.4 else theme.OK)
+        x, y, width, height = 174, 10, 22, 11
+        draw.rounded_rectangle([x, y, x + width, y + height], radius=2,
+                               outline=theme.BORDER)
+        draw.rectangle([x + width + 1, y + 3, x + width + 3, y + height - 3],
+                       fill=theme.BORDER)
+        if fraction > 0.02:
+            draw.rectangle([x + 2, y + 2,
+                            x + 2 + int((width - 4) * fraction), y + height - 2],
+                           fill=colour)
+        # A bar answers "roughly?"; the number answers "will this last
+        # the walk back?".
+        draw.text((203, 9), f"{state.battery_percent:.0f}%",
+                  font=theme.font(11), fill=colour)
 
     # Duty-cycle pressure: a thin bar that only earns attention when high.
     if state.duty_fraction > 0.01:
         colour = theme.OK if state.duty_fraction < 0.6 else (
             theme.WARN if state.duty_fraction < 0.9 else theme.DANGER
         )
-        meter(draw, [166, 12, 188, 18], state.duty_fraction, colour, radius=2)
+        meter(draw, [112, 12, 134, 18], state.duty_fraction, colour, radius=2)
 
 
 def draw_footer(draw, state: ViewState, lines: list):
@@ -349,6 +374,7 @@ def draw_status(draw, state: ViewState):
         ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
         ("link", "connected" if state.target_linked else "not connected"),
         ("mode pins", state.radio_note or "not checked"),
+        ("battery", state.battery_summary or "no battery"),
         ("backlight", "pinned 100% (shares the radio's M0)"
                       if state.brightness_locked else "auto-dims when idle"),
         ("last rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
@@ -371,6 +397,8 @@ def draw_status(draw, state: ViewState):
             colour = theme.DANGER
         elif label == "link":
             colour = theme.OK if state.target_linked else theme.TEXT_DIM
+        elif label == "battery" and state.battery_low:
+            colour = theme.DANGER
         draw.text((96, y - 1), ellipsise(draw, value, theme.font(12), 134),
                   font=theme.font(12), fill=colour)
 

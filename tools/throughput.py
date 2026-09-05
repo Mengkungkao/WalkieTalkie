@@ -177,6 +177,7 @@ def run_ramp(link, args):
     print(f"  {'-'*6} {'-'*5} {'-'*8} {'-'*10} {'-'*8}  {'-'*24}")
 
     ok_any = False
+    losses = {}
     for size in sizes:
         # "Hello world" for the first rung, filler after it, so a failure
         # at size 11 is unmistakably the link and not the payload.
@@ -187,12 +188,47 @@ def run_ramp(link, args):
 
         body = MARK + payload
         frags = max(1, -(-len(body) // protocol.MAX_BODY))
-        replies.clear()
-        got.clear()
 
-        started = time.monotonic()
-        link.send_text(args.to, body.decode("utf-8", "replace"))
-        if not got.wait(args.timeout):
+        # Repeat to measure loss: one success proves the link exists, but
+        # only a run of them says how reliable it is.
+        attempts = max(1, args.repeat)
+        good = 0
+        rtts = []
+        rssis = []
+        last_note = ""
+        for _ in range(attempts):
+            replies.clear()
+            got.clear()
+            started = time.monotonic()
+            link.send_text(args.to, body.decode("utf-8", "replace"))
+            if got.wait(args.timeout):
+                rtts.append(time.monotonic() - started)
+                if replies.get("body") == payload:
+                    good += 1
+                    last_note = "ok"
+                else:
+                    last_note = (f"CORRUPT ({len(replies.get('body', b''))}"
+                                 f"/{len(payload)} B back)")
+                if replies.get("rssi") is not None:
+                    rssis.append(replies["rssi"])
+            else:
+                last_note = "no reply"
+            if attempts > 1:
+                time.sleep(0.3)
+
+        if attempts > 1:
+            lost = attempts - good
+            losses[size] = (good, attempts)
+            rtt = sum(rtts) / len(rtts) if rtts else 0.0
+            rate = len(payload) / rtt if rtt else 0.0
+            rssi = (sum(rssis) / len(rssis)) if rssis else link.stats.last_rssi
+            note = f"{good}/{attempts} ok" + (f", {lost} lost" if lost else "")
+            print(f"  {size:>6} {frags:>5} {rtt:>7.2f}s {rate:>7.0f} B/s "
+                  f"{(f'{rssi:.0f} dBm') if rssi is not None else '?':>8}  {note}")
+            ok_any = ok_any or good > 0
+            continue
+
+        if not rtts:
             print(f"  {size:>6} {frags:>5} {'--':>8} {'--':>10} {'--':>8}  "
                   f"no reply in {args.timeout:.0f}s")
             if not ok_any:
@@ -204,7 +240,7 @@ def run_ramp(link, args):
                   f"{sizes[max(0, sizes.index(size) - 1)]} B")
             return 0
 
-        rtt = time.monotonic() - started
+        rtt = rtts[0]
         returned = replies.get("body", b"")
         intact = returned == payload
         # Per-message RSSI when the module's byte arrived with the frame,
@@ -220,6 +256,13 @@ def run_ramp(link, args):
         print(f"  {size:>6} {frags:>5} {rtt:>7.2f}s {rate:>7.0f} B/s "
               f"{(str(rssi) + ' dBm') if rssi is not None else '?':>8}  {note}")
         ok_any = ok_any or intact
+
+    if losses:
+        sent = sum(total for _good, total in losses.values())
+        received = sum(good for good, _total in losses.values())
+        pct = 100.0 * (sent - received) / sent if sent else 0.0
+        print(f"\n  round trips: {received}/{sent} completed, "
+              f"{pct:.0f}% lost")
 
     airtime = link.budget.used_seconds()
     print(f"\n  airtime used: {airtime:.1f}s  "
@@ -245,6 +288,8 @@ def main() -> int:
     parser.add_argument("--mode-pins", default=None, help="override, e.g. 5,6")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--size", type=int, help="test one payload size only")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="send each size this many times and report loss")
     parser.add_argument("--max-size", type=int, default=1930)
     parser.add_argument("--force", action="store_true",
                         help="run even if the mode pins say the radio is deaf")
