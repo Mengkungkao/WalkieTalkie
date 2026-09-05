@@ -461,6 +461,18 @@ flush BCM 27 rests high and the module sits in configuration mode. Ending
 each data transfer with DC low costs one GPIO write and is invisible to
 the display, which only samples DC while SPI is clocking.
 
+The change is written up as [docs/whisplay-dc-fix.patch](docs/whisplay-dc-fix.patch),
+to apply in the Whisplay checkout:
+
+```bash
+cd ~/Whisplay && git apply ~/WalkieTalkie/docs/whisplay-dc-fix.patch
+sudo systemctl restart whisplay-daemon
+```
+
+Once it lands, the Status screen's `mode pins` row should read
+`transparent` instead of `configuration`, and the two radios link on
+their own.
+
 ## Power
 
 The Pi Zero 2 W is expected to run from a battery, so idle cost is a
