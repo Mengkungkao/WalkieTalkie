@@ -10,6 +10,14 @@ HERE="$(pwd)"
 
 AUTOSTART=0
 [ "${1:-}" = "--autostart" ] && AUTOSTART=1
+# --no-autostart removes a previously installed unit, for going back to
+# launching it from the HAT desktop by hand.
+if [ "${1:-}" = "--no-autostart" ]; then
+    systemctl --user disable --now walkie-talkie.service >/dev/null 2>&1 || true
+    rm -f ~/.config/systemd/user/walkie-talkie.service
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    echo "==> autostart removed; launch it from the HAT desktop"
+fi
 
 echo "==> preflight"
 python3 - <<'CHECK'

@@ -87,7 +87,7 @@ def play(app, *gestures):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["device_id", "base", "add", "clock", "reset", "quit"]
+    assert keys == ["device_id", "base", "add", "clock", "reset"]
     assert app.state.screen == SETTINGS
 
 

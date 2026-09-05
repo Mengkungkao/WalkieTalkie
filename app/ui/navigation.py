@@ -39,7 +39,7 @@ REPLAY_LAST = "replay_last"
 OPEN_SETTINGS = "open_settings"
 NEXT_SETTING = "next_setting"
 OPEN_SETTING = "open_setting"
-BACKGROUND_APP = "background_app"
+EXIT_APP = "exit_app"
 
 # Screens you pick from, rather than screens you are in. Two clicks opens
 # a row here and leaves everywhere else.
@@ -49,7 +49,7 @@ MENU_SCREENS = (CONTACTS, SETTINGS)
 # can strand the operator.
 LEAVING_ACTIONS = {
     OPEN_TALK, OPEN_INBOX, OPEN_STATUS, OPEN_SETTINGS,
-    BACK_CONTACTS, BACK_TALK, BACKGROUND_APP,
+    BACK_CONTACTS, BACK_TALK, EXIT_APP,
 }
 
 # gesture -> (action, short label for the on-screen hint)
@@ -89,15 +89,14 @@ EMPTY_INBOX_ACTIONS = {
     TRIPLE: (BACK_TALK, "back"),
 }
 
-# Four clicks hides the app from anywhere, and hold always talks. Neither
-# is remapped per screen: the way out and the way to transmit must not
+# Four clicks exits from anywhere, and hold always talks. Neither is
+# remapped per screen: the way out and the way to transmit must not
 # depend on where you happen to be.
 #
-# It hides rather than quits. Exiting closed the serial port, so the
-# radio went deaf the moment you left the app and any message sent while
-# you were on the desktop was lost. Stopping the radio for real is in
-# Settings, where it has to be confirmed.
-GLOBAL_ACTIONS = {QUAD: (BACKGROUND_APP, "hide")}
+# Exiting closes the serial port, so the radio stops listening until the
+# app is opened again. That is the deliberate trade: the app is a thing
+# you open when you want it, not a service running behind the desktop.
+GLOBAL_ACTIONS = {QUAD: (EXIT_APP, "exit")}
 
 
 def actions(screen: str, inbox_empty: bool = False) -> dict:

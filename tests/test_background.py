@@ -1,9 +1,9 @@
-"""Four clicks hides the app; it must not stop listening.
+"""Leaving the app, and what keeps running when focus goes away.
 
-Exiting closed the serial port, so the radio went deaf the moment you
-left the app and anything sent while you were on the desktop was lost. A
-walkie-talkie that only hears you when its screen is open is not a
-walkie-talkie.
+Four clicks exits: the app is something you open when you want it, not a
+service behind the desktop. Losing *focus* is different -- another app
+taking the screen must not take the radio with it, because the process
+is still alive and still listening.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import pytest
 from app.config.settings import Settings
 from app.main import WalkieApp
 from app.ui import navigation as nav
-from app.ui.screens import CONTACTS, SETTINGS, TALK, ViewState
+from app.ui.screens import SETTINGS, TALK, ViewState
 
 QUAD = "quad"
 
@@ -21,26 +21,6 @@ QUAD = "quad"
 class FakeBoard:
     def __init__(self):
         self.foreground_ready = True
-        self.released = False
-
-    def release_focus(self):
-        self.released = True
-
-
-class FakeDisplay:
-    def __init__(self):
-        self.backlight = 0
-        self.screen_off = False
-        self.led = None
-
-    def restore_backlight(self):
-        self.backlight = 80
-
-    def set_led(self, colour, fade_ms=0):
-        self.led = colour
-
-    def poke(self): pass
-    def invalidate(self): pass
 
 
 class FakeRecorder:
@@ -66,6 +46,15 @@ class FakeLink:
         self.stopped = True
 
 
+class FakeDisplay:
+    screen_off = False
+
+    def poke(self): pass
+    def invalidate(self): pass
+    def restore_backlight(self): pass
+    def set_led(self, *_a, **_k): pass
+
+
 @pytest.fixture
 def app():
     instance = WalkieApp.__new__(WalkieApp)
@@ -76,68 +65,47 @@ def app():
     instance.link = FakeLink()
     instance.state = ViewState(screen=TALK)
     instance._wake = type("Event", (), {"set": lambda self: None})()
+    instance._closing = False
     instance.running = True
     return instance
 
 
-def test_four_clicks_is_routed_to_background_not_exit():
-    assert nav.route(TALK, QUAD) == nav.BACKGROUND_APP
+def test_four_clicks_is_routed_to_exit():
+    assert nav.route(TALK, QUAD) == nav.EXIT_APP
+    assert nav.route(SETTINGS, QUAD) == nav.EXIT_APP
 
 
-def test_backgrounding_keeps_the_link_running(app):
-    """The whole point: the radio must still be listening afterwards."""
-    app._background()
+def test_stopping_sets_the_loop_to_finish(app):
+    app.stop("user")
+    assert app.running is False
+    assert app._closing is True
+
+
+def test_losing_focus_does_not_stop_the_radio(app):
+    """Another app taking the screen must not take the radio with it."""
+    app._on_focus_revoked()
     assert app.link.stopped is False
     assert app.running is True
-
-
-def test_backgrounding_releases_the_screen(app):
-    app._background()
-    assert app.board.released is True
     assert app.board.foreground_ready is False
-    assert app.foregrounded is False
 
 
-def test_backgrounding_hands_the_panel_back_lit(app):
-    """The daemon inherits our brightness; leaving it dark looks broken."""
-    app._background()
-    assert app.display.backlight > 0
+def test_losing_focus_while_closing_is_ignored(app):
+    """Focus is revoked as part of shutting down; do not chase it."""
+    app._closing = True
+    app._on_focus_revoked()
+    assert app.board.foreground_ready is True
 
 
-def test_backgrounding_powers_the_microphone_down(app):
-    """Nobody can press talk off screen, so the codec should not stay warm."""
-    assert app.recorder.armed
-    app._background()
-    assert app.recorder.armed is False
-
-
-def test_backgrounding_twice_is_harmless(app):
-    app._background()
-    app.board.released = False
-    app._background()
-    assert app.board.released is False, "should not release focus it does not hold"
-
-
-def test_the_microphone_stays_off_while_backgrounded(app):
-    """Idle policy must not re-arm the codec for an app nobody can see."""
-    app._background()
-    app.recorder.armed = False
+def test_the_microphone_is_disarmed_off_screen(app):
+    """Nobody can press talk on a screen they cannot see."""
+    app.board.foreground_ready = False
     app._follow_idle_with_the_microphone()
     assert app.recorder.armed is False
 
 
-def test_the_microphone_re_arms_once_foregrounded_again(app):
-    app._background()
-    app.board.foreground_ready = True          # the daemon handed it back
+def test_the_microphone_re_arms_once_visible_again(app):
+    app.board.foreground_ready = False
+    app._follow_idle_with_the_microphone()
+    app.board.foreground_ready = True
     app._follow_idle_with_the_microphone()
     assert app.recorder.armed is True
-
-
-def test_stopping_the_radio_is_a_separate_confirmed_action(app):
-    """Quitting for real exists, but it is not a gesture you can fumble."""
-    app.overrides = type("O", (), {"base_address": None})()
-    app.inbox = type("I", (), {"items": []})()
-    app.roster = type("R", (), {"entries": staticmethod(lambda: [])})()
-    keys = [item["key"] for item in WalkieApp._settings_items(app)]
-    assert "quit" in keys
-    assert nav.route(SETTINGS, QUAD) == nav.BACKGROUND_APP  # still only hides
