@@ -26,13 +26,11 @@ def panel(draw, box, fill=theme.SURFACE, outline=None, radius: int = 8):
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline)
 
 
-def signal_bars(draw, x: int, y: int, rssi, height: int = 12,
-                show_level: bool = False):
+def signal_bars(draw, x: int, y: int, rssi, height: int = 12):
     """Four ascending bars; unfilled bars stay visible as faint outlines.
 
-    With `show_level`, the count is printed beside them. Bars answer
-    "roughly?" at a glance; the digit is what you read out loud when
-    someone asks how the signal is where you are standing.
+    Height and colour carry it; a digit beside them said the same thing
+    twice and crowded a header that has four things in it already.
     """
     level = theme.signal_level(rssi)
     colour = theme.signal_colour(level)
@@ -44,8 +42,6 @@ def signal_bars(draw, x: int, y: int, rssi, height: int = 12,
             [left, top, left + 3, y + height],
             fill=colour if index < level else theme.SURFACE_HI,
         )
-    if show_level:
-        draw.text((x + 23, y - 1), str(level), font=theme.font(11), fill=colour)
 
 
 def meter(draw, box, fraction: float, fill, track=theme.SURFACE_HI, radius=3):

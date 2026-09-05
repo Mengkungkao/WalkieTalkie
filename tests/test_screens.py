@@ -282,20 +282,17 @@ def test_every_level_has_a_word_for_it():
         assert theme.SIGNAL_LABELS[level]
 
 
-def test_the_header_shows_the_level_digit(display):
-    """The digit is what you read out when asked how the signal is."""
+def test_stronger_signals_paint_more_bars(display):
+    """Height and colour are the whole indicator now, so they must move."""
     from PIL import Image, ImageDraw
 
     from app.ui.widgets import signal_bars
 
-    image = Image.new("RGB", (240, 30), theme.BG)
-    draw = ImageDraw.Draw(image)
-    signal_bars(draw, 20, 9, -75, show_level=True)
-    with_digit = sum(1 for p in image.getdata() if p != theme.BG)
-
-    image = Image.new("RGB", (240, 30), theme.BG)
-    draw = ImageDraw.Draw(image)
-    signal_bars(draw, 20, 9, -75, show_level=False)
-    without = sum(1 for p in image.getdata() if p != theme.BG)
-
-    assert with_digit > without, "show_level drew nothing extra"
+    painted = []
+    for rssi in (-120, -100, -60):
+        image = Image.new("RGB", (240, 30), theme.BG)
+        signal_bars(ImageDraw.Draw(image), 20, 9, rssi)
+        lit = sum(1 for p in image.getdata()
+                  if p not in (theme.BG, theme.SURFACE_HI))
+        painted.append(lit)
+    assert painted[0] < painted[1] < painted[2]

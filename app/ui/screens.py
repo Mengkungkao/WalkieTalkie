@@ -150,7 +150,7 @@ def draw_header(draw, state: ViewState, title: str):
 
     # Right-hand status, ordered like a phone's: how far you can reach,
     # then how long you can keep reaching.
-    signal_bars(draw, 132, 9, state.last_rssi, show_level=True)
+    signal_bars(draw, 144, 9, state.last_rssi)
 
     x, y, width, height = 172, 10, 22, 11
     draw.rounded_rectangle([x, y, x + width, y + height], radius=2,
@@ -184,7 +184,7 @@ def draw_header(draw, state: ViewState, title: str):
         colour = theme.OK if state.duty_fraction < 0.6 else (
             theme.WARN if state.duty_fraction < 0.9 else theme.DANGER
         )
-        meter(draw, [100, 12, 122, 18], state.duty_fraction, colour, radius=2)
+        meter(draw, [112, 12, 134, 18], state.duty_fraction, colour, radius=2)
 
 
 def draw_footer(draw, state: ViewState, lines: list):
@@ -438,7 +438,6 @@ def draw_status(draw, state: ViewState):
         ("LINK", [
             ("peer", "connected" if state.target_linked else "not connected"),
             ("rssi", (f"{state.last_rssi} dBm  ·  "
-                      f"{theme.signal_level(state.last_rssi)}/4 "
                       f"{theme.SIGNAL_LABELS[theme.signal_level(state.last_rssi)]}")
                      if state.last_rssi is not None else "nothing heard yet"),
             ("duty", f"{state.duty_fraction * 100:.0f}% of the hour used"),
