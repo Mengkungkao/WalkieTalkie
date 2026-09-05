@@ -487,6 +487,48 @@ the right duration and the message plays anyway, marked *(gaps)*.
 
 ---
 
+## Measuring the link
+
+Before trusting voice, check that bytes cross at all and how fast:
+
+```bash
+# Pi Zero
+python3 tools/throughput.py --echo
+
+# Pi 4B
+python3 tools/throughput.py --ramp --to 51
+```
+
+It starts with `Hello world` and works upward, so a failure on the first
+rung is unmistakably the link rather than the payload. Every payload is
+echoed back, because a one-way test passes on a radio that can hear but
+cannot be heard — which is the failure this hardware actually had.
+
+```
+   bytes frags      rtt    thruput     rssi  result
+      11     1    0.42s      26 B/s  -74 dBm  ok
+     193     2    1.12s     172 B/s  -76 dBm  ok
+     386     3    1.83s     211 B/s  -75 dBm  ok
+```
+
+Throughput is payload bytes over the **round trip**, so it counts both
+directions plus the far end's turnaround — roughly half the one-way rate,
+and the number that matters when you are waiting for an answer. Airtime
+used is reported against the hour's 1% duty-cycle budget.
+
+The mode pins are checked before anything is sent. A module in
+configuration or sleep mode accepts every byte over the UART and radiates
+none of them, so without that check a wiring fault is indistinguishable
+from a range problem:
+
+```
+! the module is in configuration mode (M0=GPIO5 M1=GPIO6 read (0, 1)).
+  It will accept every byte over the UART and radiate none of them.
+```
+
+The app must be stopped first, since it holds the port:
+`systemctl --user stop walkie-talkie.service`
+
 ## Testing
 
 ```bash
