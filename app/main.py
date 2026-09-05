@@ -62,6 +62,9 @@ FRAME_INTERVAL = {RECORDING: 0.08, SENDING: 0.25, PLAYING: 0.3, RECEIVING: 0.3}
 # A press shorter than this after the hold threshold is a slip, not speech.
 MIN_TALK_SECONDS = 0.4
 
+# How often to re-call an unlinked station while its Talk page is open.
+RECALL_SECONDS = 45.0
+
 
 class WalkieApp:
     def __init__(self, settings):
@@ -146,6 +149,7 @@ class WalkieApp:
 
         self._playback_lock = threading.Lock()
         self._pending_hello = None
+        self._last_recall = 0.0
         # The screen cannot dim on this build -- the backlight pin is the
         # radio's M0 -- so the charge left is worth showing.
         self.battery = battery.Monitor()
@@ -857,12 +861,29 @@ class WalkieApp:
         # Link state for the contact dots and the Talk screen's warning.
         self.state.link_states = self._link_states()
         selected = self.roster.selected()
+        # Stale counts as connected: the handshake succeeded and nothing
+        # has contradicted it. Only never-linked or refused is "not
+        # connected", which is what the operator can actually act on.
+        target_state = (self.state.link_states.get(selected.address)
+                        if selected is not None else None)
         self.state.target_linked = (
             selected is not None
             and (selected.is_broadcast
-                 or self.state.link_states.get(selected.address)
-                 == protocol.LINK_LINKED)
+                 or target_state in (protocol.LINK_LINKED, protocol.LINK_STALE))
         )
+
+        # Quietly re-call anything not linked while its page is open. A
+        # hello is 13 bytes; sitting there saying "not connected" when one
+        # small packet would fix it is the worse trade.
+        if (self.state.screen == TALK and selected is not None
+                and not selected.is_broadcast
+                and target_state not in (protocol.LINK_LINKED,
+                                         protocol.LINK_CALLING,
+                                         protocol.LINK_REJECTED)):
+            now = time.monotonic()
+            if now - self._last_recall >= RECALL_SECONDS:
+                self._last_recall = now
+                self._call(selected.address)
 
         power = self.battery.poll()
         self.state.battery_present = power.present

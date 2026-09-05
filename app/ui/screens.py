@@ -132,7 +132,17 @@ STATE_LABEL = {
 
 # --- chrome ------------------------------------------------------------
 def draw_header(draw, state: ViewState, title: str):
-    draw.rectangle([0, 0, theme.SCREEN_WIDTH, HEADER_HEIGHT], fill=theme.SURFACE)
+    # Rounded at the top to follow the panel, square at the bottom where
+    # it meets the content. A square fill here loses its corners to the
+    # bezel and looks like a rendering fault.
+    # Round the top, square the bottom. Drawn as a rounded rectangle plus
+    # a patch rather than with `corners=`, which needs Pillow 9.4 and is
+    # not worth a version floor for two corners.
+    radius = theme.CORNER_RADIUS
+    draw.rounded_rectangle([0, 0, theme.SCREEN_WIDTH - 1, HEADER_HEIGHT],
+                           radius=radius, fill=theme.SURFACE)
+    draw.rectangle([0, radius, theme.SCREEN_WIDTH - 1, HEADER_HEIGHT],
+                   fill=theme.SURFACE)
     draw.line([0, HEADER_HEIGHT, theme.SCREEN_WIDTH, HEADER_HEIGHT],
               fill=theme.BORDER)
     draw.text((10, 8), ellipsise(draw, title, theme.font(14, "bold"), 96),
@@ -140,7 +150,7 @@ def draw_header(draw, state: ViewState, title: str):
 
     # Right-hand status, ordered like a phone's: how far you can reach,
     # then how long you can keep reaching.
-    signal_bars(draw, 144, 9, state.last_rssi)
+    signal_bars(draw, 132, 9, state.last_rssi, show_level=True)
 
     x, y, width, height = 172, 10, 22, 11
     draw.rounded_rectangle([x, y, x + width, y + height], radius=2,
@@ -174,7 +184,7 @@ def draw_header(draw, state: ViewState, title: str):
         colour = theme.OK if state.duty_fraction < 0.6 else (
             theme.WARN if state.duty_fraction < 0.9 else theme.DANGER
         )
-        meter(draw, [112, 12, 134, 18], state.duty_fraction, colour, radius=2)
+        meter(draw, [100, 12, 122, 18], state.duty_fraction, colour, radius=2)
 
 
 def draw_footer(draw, state: ViewState, lines: list):
@@ -275,8 +285,10 @@ def draw_talk(draw, state: ViewState):
     colour = STATE_COLOUR[state.radio_state]
     label = STATE_LABEL[state.radio_state]
 
-    # The state disc: the one element readable at arm's length.
-    cx, cy, radius = theme.SCREEN_WIDTH // 2, 108, 52
+    # The state disc: the one element readable at arm's length. Sits
+    # lower than the label rather than under it -- at 52 px radius from
+    # y=108 the ring reached y=56 and collided with the text above.
+    cx, cy, radius = theme.SCREEN_WIDTH // 2, 122, 50
     draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
                  fill=theme.SURFACE, outline=colour, width=4)
 
@@ -286,13 +298,13 @@ def draw_talk(draw, state: ViewState):
         draw.ellipse([cx - inner, cy - inner, cx + inner, cy + inner], fill=colour)
         # Inside the ring, not under it: at 20 px this used to be drawn
         # straight through the level meter below.
-        centred(draw, cy + radius + 8, f"{state.record_seconds:.1f}s",
+        centred(draw, cy + radius + 4, f"{state.record_seconds:.1f}s",
                 theme.font(16, "bold"), theme.TEXT)
     elif state.radio_state == SENDING:
         fraction = state.tx_sent / state.tx_total if state.tx_total else 0.0
         centred(draw, cy - 14, f"{int(fraction * 100)}%",
                 theme.font(28, "bold"), theme.TEXT)
-        centred(draw, cy + radius + 10,
+        centred(draw, cy + radius + 6,
                 f"packet {state.tx_sent}/{state.tx_total}",
                 theme.font(13), theme.TEXT_DIM)
     elif state.radio_state == PLAYING:
@@ -304,19 +316,19 @@ def draw_talk(draw, state: ViewState):
             draw.arc([cx - size, cy - size, cx + size, cy + size],
                      start=300, end=60, fill=colour, width=3)
     else:
-        centred(draw, cy - 12, "HOLD", theme.font(24, "bold"), theme.TEXT_DIM)
-        centred(draw, cy + 14, "to talk", theme.font(13), theme.TEXT_FAINT)
+        centred(draw, cy - 14, "HOLD", theme.font(24, "bold"), theme.TEXT_DIM)
+        centred(draw, cy + 12, "to talk", theme.font(13), theme.TEXT_FAINT)
 
-    centred(draw, 42, label, theme.font(14, "bold"), colour)
+    centred(draw, 46, label, theme.font(14, "bold"), colour)
 
 
     # Level or progress bar under the disc, clear of the timer above it.
-    bar = [24, 192, theme.SCREEN_WIDTH - 24, 202]
+    bar = [24, 200, theme.SCREEN_WIDTH - 24, 210]
     if state.radio_state == RECORDING:
         vu_meter(draw, bar, state.record_level)
         remaining = state.max_record_seconds - state.record_seconds
         if remaining <= 5:
-            centred(draw, 208, f"{remaining:.0f}s left",
+            centred(draw, 216, f"{remaining:.0f}s left",
                     theme.font(12, "bold"), theme.WARN)
     elif state.radio_state == SENDING:
         meter(draw, bar,
@@ -324,6 +336,11 @@ def draw_talk(draw, state: ViewState):
     else:
         detail = f"codec2 {state.codec_name}  ·  {state.frequency_mhz} MHz"
         colour = theme.TEXT_FAINT
+        if state.entries and state.selected_index < len(state.entries):
+            entry = state.entries[state.selected_index]
+            if (state.link_states.get(entry.address) == "stale"
+                    and not entry.is_broadcast):
+                detail = f"connected  ·  last heard {entry.status}"
         if state.radio_deaf:
             # Worth shouting about: everything else looks like it works.
             detail = "RADIO DEAF — check M0/M1 jumpers"
@@ -341,18 +358,17 @@ def draw_talk(draw, state: ViewState):
             detail, colour = {
                 "calling": ("calling…", theme.WARN),
                 "rejected": ("refused the link", theme.DANGER),
-                "stale": ("not heard recently", theme.WARN),
-            }.get(link, ("not connected — open Talk to call", theme.TEXT_FAINT))
-        centred(draw, 194, detail, theme.font(12), colour)
+            }.get(link, ("not connected — calling…", theme.TEXT_FAINT))
+        centred(draw, 202, detail, theme.font(12), colour)
 
     if state.queued:
-        centred(draw, 222, f"{state.queued} queued", theme.font(11), theme.WARN)
+        centred(draw, 228, f"{state.queued} queued", theme.font(11), theme.WARN)
     elif state.duty_fraction > 0.85:
         # Only when the hour's airtime is nearly spent. The old test fired
         # whenever duty_remaining happened to be zero, which is its
         # starting value -- so a fresh radio warned that it was out of
         # airtime before it had sent anything.
-        centred(draw, 222, f"airtime {state.duty_fraction * 100:.0f}% used",
+        centred(draw, 228, f"airtime {state.duty_fraction * 100:.0f}% used",
                 theme.font(11), theme.WARN)
 
     draw_footer(draw, state, _hints(TALK))
@@ -421,7 +437,10 @@ def draw_status(draw, state: ViewState):
         ]),
         ("LINK", [
             ("peer", "connected" if state.target_linked else "not connected"),
-            ("rssi", f"{state.last_rssi} dBm" if state.last_rssi is not None else "-"),
+            ("rssi", (f"{state.last_rssi} dBm  ·  "
+                      f"{theme.signal_level(state.last_rssi)}/4 "
+                      f"{theme.SIGNAL_LABELS[theme.signal_level(state.last_rssi)]}")
+                     if state.last_rssi is not None else "nothing heard yet"),
             ("duty", f"{state.duty_fraction * 100:.0f}% of the hour used"),
             ("pkts", f"tx {stats.get('packets_tx', 0)}   "
                      f"rx {stats.get('packets_rx', 0)}   "

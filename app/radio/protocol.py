@@ -55,7 +55,16 @@ LINK_STALE = "stale"
 LINK_REJECTED = "rejected"
 
 # How long a completed handshake stays good without hearing anything.
-LINK_TIMEOUT = 20 * 60
+#
+# Long, deliberately. A walkie-talkie on standby is silent for most of
+# its life, and treating silence as disconnection made the Talk screen
+# say "not connected" about a station that was sitting right there and
+# perfectly reachable. A handshake proved the link once; only evidence
+# should retract that, not the absence of conversation.
+#
+# Past this the station is "stale" -- still linked, but worth re-checking
+# and worth telling the operator when it was last heard.
+LINK_TIMEOUT = 60 * 60
 
 BROADCAST = 0xFFFF
 

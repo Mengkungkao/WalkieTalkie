@@ -245,3 +245,57 @@ def test_mains_power_is_shown_rather_than_left_blank(display):
     arr = image.crop((196, 6, 232, 24)).convert("RGB").getcolors(4096)
     assert any(colour != theme.SURFACE and count < 600 for count, colour in arr), \
         "nothing drawn where the power indicator belongs"
+
+
+# --- signal scale ------------------------------------------------------
+@pytest.mark.parametrize("rssi,level", [
+    (-60, 4), (-80, 4), (-81, 3), (-95, 3), (-96, 2),
+    (-105, 2), (-106, 1), (-115, 1), (-116, 0), (None, 0),
+])
+def test_signal_level_matches_the_published_bands(rssi, level):
+    assert theme.signal_level(rssi) == level
+
+
+def test_bars_and_colour_cannot_disagree():
+    """They were written separately: -86 dBm gave four bars in amber."""
+    for rssi in range(-130, -50):
+        level = theme.signal_level(rssi)
+        colour = theme.signal_colour(level)
+        if level >= 3:
+            assert colour == theme.OK
+        elif level == 2:
+            assert colour == theme.WARN
+        elif level == 1:
+            assert colour == theme.DANGER
+        assert theme.rssi_colour(rssi) == colour
+        assert theme.rssi_bars(rssi) == level
+
+
+def test_the_scale_is_monotonic():
+    """A stronger signal must never show fewer bars."""
+    levels = [theme.signal_level(r) for r in range(-130, -50)]
+    assert levels == sorted(levels)
+
+
+def test_every_level_has_a_word_for_it():
+    for level in range(5):
+        assert theme.SIGNAL_LABELS[level]
+
+
+def test_the_header_shows_the_level_digit(display):
+    """The digit is what you read out when asked how the signal is."""
+    from PIL import Image, ImageDraw
+
+    from app.ui.widgets import signal_bars
+
+    image = Image.new("RGB", (240, 30), theme.BG)
+    draw = ImageDraw.Draw(image)
+    signal_bars(draw, 20, 9, -75, show_level=True)
+    with_digit = sum(1 for p in image.getdata() if p != theme.BG)
+
+    image = Image.new("RGB", (240, 30), theme.BG)
+    draw = ImageDraw.Draw(image)
+    signal_bars(draw, 20, 9, -75, show_level=False)
+    without = sum(1 for p in image.getdata() if p != theme.BG)
+
+    assert with_digit > without, "show_level drew nothing extra"

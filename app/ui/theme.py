@@ -15,6 +15,26 @@ from PIL import ImageFont
 SCREEN_WIDTH = 240
 SCREEN_HEIGHT = 280
 
+# The panel's corners are physically rounded -- whisplay.py records it as
+# `CornerHeight = 20` and then never uses it, so compensating is the
+# application's job. A square-cornered fill drawn to the edge has its
+# corners swallowed by the bezel, and anything printed in them is simply
+# not there.
+CORNER_RADIUS = 20
+
+
+def corner_inset(y: int) -> int:
+    """Horizontal margin needed at this row to stay inside the curve.
+
+    Zero through the straight middle of the panel, rising to the full
+    radius at the very top and bottom rows.
+    """
+    depth = min(y, SCREEN_HEIGHT - 1 - y)
+    if depth >= CORNER_RADIUS:
+        return 0
+    offset = CORNER_RADIUS - depth
+    return int(round(CORNER_RADIUS - (CORNER_RADIUS ** 2 - offset ** 2) ** 0.5))
+
 BG = (10, 12, 16)
 SURFACE = (22, 26, 34)
 SURFACE_HI = (36, 42, 54)
@@ -68,22 +88,41 @@ def font(size: int, weight: str = "regular"):
     return _cache[key]
 
 
-def rssi_colour(rssi):
-    """Signal strength as a colour. Anything under -110 dBm is marginal."""
+# Signal strength, in dBm, at the bottom of each bar. One table, so the
+# bar count and the colour cannot disagree -- they used to: at -86 dBm
+# the meter showed four bars in amber, and at -90 three bars in amber,
+# because the colour thresholds and the bar thresholds were written
+# separately and did not line up.
+#
+# The numbers suit LoRa rather than WiFi. A 868 MHz link is still solid
+# at -100 dBm, where WiFi would have given up, so the bands are shifted
+# down accordingly.
+SIGNAL_FLOORS = (-115, -105, -95, -80)   # 1, 2, 3, 4 bars
+
+SIGNAL_LABELS = {0: "no signal", 1: "weak", 2: "fair", 3: "good", 4: "strong"}
+
+
+def signal_level(rssi) -> int:
+    """0-4 bars from a dBm reading. 0 means nothing heard yet."""
     if rssi is None:
-        return TEXT_FAINT
-    if rssi >= -85:
+        return 0
+    return sum(1 for floor in SIGNAL_FLOORS if rssi >= floor)
+
+
+def signal_colour(level: int):
+    """Green is comfortable, amber is workable, red is about to fail."""
+    if level >= 3:
         return OK
-    if rssi >= -105:
+    if level == 2:
         return WARN
-    return DANGER
+    if level == 1:
+        return DANGER
+    return TEXT_FAINT
+
+
+def rssi_colour(rssi):
+    return signal_colour(signal_level(rssi))
 
 
 def rssi_bars(rssi) -> int:
-    """0-4 bars from a dBm reading."""
-    if rssi is None:
-        return 0
-    for index, floor in enumerate((-120, -110, -100, -88)):
-        if rssi < floor:
-            return index
-    return 4
+    return signal_level(rssi)
