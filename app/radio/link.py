@@ -166,6 +166,12 @@ class LoraLink:
             for payload, rssi_byte in self._deframer.feed(data):
                 self._handle_payload(payload, rssi_byte)
             self.stats.frames_dropped = self._deframer.frames_bad
+            # The module appends its RSSI report after the packet, and it
+            # often arrives in a later read than the frame it describes.
+            # Rather than delay every message waiting for it, take it as
+            # the channel's most recent reading.
+            if self._deframer.last_rssi_byte is not None:
+                self.stats.last_rssi = -(256 - self._deframer.last_rssi_byte)
 
     def _handle_payload(self, payload: bytes, rssi_byte):
         rssi = -(256 - rssi_byte) if rssi_byte is not None else None

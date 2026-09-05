@@ -207,7 +207,11 @@ def run_ramp(link, args):
         rtt = time.monotonic() - started
         returned = replies.get("body", b"")
         intact = returned == payload
+        # Per-message RSSI when the module's byte arrived with the frame,
+        # otherwise the channel's most recent reading.
         rssi = replies.get("rssi")
+        if rssi is None:
+            rssi = link.stats.last_rssi
         rate = len(payload) / rtt if rtt else 0.0
         note = "ok" if intact else (
             f"CORRUPT ({len(returned)}/{len(payload)} B back)")

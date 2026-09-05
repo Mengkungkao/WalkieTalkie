@@ -84,11 +84,22 @@ class Deframer:
     # cannot grow it without limit while we wait for a frame to complete.
     MAX_BUFFER = 4096
 
+    # The module reports RSSI as 256 - |dBm|, so a real reading lands
+    # between about -20 and -150 dBm. Anything outside that is a stray
+    # byte, not a measurement -- 0x00 would be "-256 dBm", which the UI
+    # cheerfully displayed until this was bounded.
+    RSSI_BYTE_RANGE = (106, 236)
+
     def __init__(self):
         self._buffer = bytearray()
         self.frames_ok = 0
         self.frames_bad = 0
         self.last_rssi_byte = None
+
+    @classmethod
+    def plausible_rssi(cls, byte) -> bool:
+        low, high = cls.RSSI_BYTE_RANGE
+        return byte is not None and low <= byte <= high
 
     def feed(self, data: bytes) -> list:
         self._buffer.extend(data)
@@ -99,13 +110,21 @@ class Deframer:
         while True:
             start = self._buffer.find(SOF)
             if start < 0:
-                # Keep only a trailing partial SOF; everything before it
-                # is inter-frame noise (the RSSI byte included).
+                # Keep only a trailing partial SOF. A single byte left
+                # over is the module's RSSI report for the frame just
+                # delivered, arriving a moment after it.
+                if len(self._buffer) == 1 and self.plausible_rssi(self._buffer[0]):
+                    self.last_rssi_byte = self._buffer[0]
                 if len(self._buffer) > 1:
                     del self._buffer[: len(self._buffer) - 1]
                 break
             if start:
-                del self._buffer[:start]  # discard whatever preceded the frame
+                # Bytes before a frame are inter-frame noise -- usually
+                # the previous packet's RSSI byte, which arrives too late
+                # to be attached to the frame it belongs to.
+                if start == 1 and self.plausible_rssi(self._buffer[0]):
+                    self.last_rssi_byte = self._buffer[0]
+                del self._buffer[:start]
 
             if len(self._buffer) < HEADER_SIZE:
                 break
@@ -134,9 +153,11 @@ class Deframer:
             # marker is that byte.
             rssi = None
             if self._buffer and not bytes(self._buffer[:2]).startswith(SOF[:1]):
-                rssi = self._buffer[0]
+                candidate = self._buffer[0]
                 del self._buffer[0]
-                self.last_rssi_byte = rssi
+                if self.plausible_rssi(candidate):
+                    rssi = candidate
+                    self.last_rssi_byte = rssi
             out.append((payload, rssi))
         return out
 
