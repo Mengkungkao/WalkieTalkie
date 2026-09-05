@@ -54,10 +54,16 @@ from app.utils.single_instance import AlreadyRunning, SingleInstance
 
 log = get_logger("main")
 
-# Refresh cadence while something is visibly moving. Nothing animates
-# when idle, so these rates apply only during a transmission or a
-# recording -- seconds at a time, not continuously.
-FRAME_INTERVAL = {RECORDING: 0.08, SENDING: 0.25, PLAYING: 0.3, RECEIVING: 0.3}
+# Refresh cadence while something is visibly moving.
+#
+# Only recording animates. Every other radio state draws a static frame,
+# and redrawing it costs more than it shows: a full 240x280 push clocks
+# DC for about 11 ms, and DC is the module's M1 on this stack, so the
+# radio is deaf for the duration. Receiving used to refresh every 300 ms,
+# which over a three-fragment message meant roughly five redraws and 10%
+# of the message's air time spent deaf -- the app was reliably deafening
+# itself exactly while being spoken to.
+FRAME_INTERVAL = {RECORDING: 0.08}
 
 # A press shorter than this after the hold threshold is a slip, not speech.
 MIN_TALK_SECONDS = 0.4
@@ -150,6 +156,7 @@ class WalkieApp:
         self._playback_lock = threading.Lock()
         self._pending_hello = None
         self._last_recall = 0.0
+        self._display_stale = False
         # The screen cannot dim on this build -- the backlight pin is the
         # radio's M0 -- so the charge left is worth showing.
         self.battery = battery.Monitor()
@@ -916,6 +923,17 @@ class WalkieApp:
         elif not should_be_armed and self.recorder.armed:
             self.recorder.disarm()
 
+    def _radio_is_busy(self) -> bool:
+        """Is the radio mid-message, in either direction?
+
+        Redrawing now flips the module's mode partway through a packet:
+        a lost fragment inbound, or a corrupted one outbound. The screen
+        can wait the second or two it takes.
+        """
+        if self.link is None:
+            return False
+        return bool(self.link.reassembling) or self.state.radio_state == SENDING
+
     def _next_timeout(self) -> float:
         """How long we may sleep before something needs attention.
 
@@ -925,6 +943,9 @@ class WalkieApp:
         animating = FRAME_INTERVAL.get(self.state.radio_state)
         if animating:
             return animating
+        if self._radio_is_busy():
+            # Nothing to draw and nothing to poll: wake on the packet.
+            return None
         deadlines = [self.display.next_idle_deadline()]
         if self.state.active_banner:
             deadlines.append(max(0.05, self.state.banner_until - time.monotonic()))
@@ -957,7 +978,15 @@ class WalkieApp:
 
         while self.running:
             self._sync_state()
-            screens.render(self.display, self.state)
+            # Hold the screen still while a message is in flight, then
+            # catch up the moment it lands.
+            if self._radio_is_busy():
+                self._display_stale = True
+            else:
+                if self._display_stale:
+                    self.display.invalidate()
+                    self._display_stale = False
+                screens.render(self.display, self.state)
             self.display.apply_idle_policy(keep_awake=self.state.busy)
             self._follow_idle_with_the_microphone()
             self._prompt_pending_hello()
