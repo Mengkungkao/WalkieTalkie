@@ -13,7 +13,8 @@ import time
 from dataclasses import dataclass, field
 
 from app.ui import theme, widgets
-from app.ui.widgets import centred, ellipsise, meter, panel, signal_bars, vu_meter
+from app.ui.widgets import (centred, ellipsise, meter, panel, signal_bars,
+                            two_line_row, vu_meter)
 
 CONTACTS = "contacts"
 TALK = "talk"
@@ -44,6 +45,23 @@ CONTENT_HEIGHT = CONTENT_BOTTOM - CONTENT_TOP
 
 # Shared margins, so columns line up between screens.
 MARGIN = 8
+
+# Row geometry, measured from the fonts each list actually uses. These
+# were hardcoded, and the detail line was drawn 1 px past the bottom of
+# its own selection frame -- visible as the text crossing the border.
+ROW_PAD, ROW_GAP, ROW_SPACING = 5, 2, 6
+
+CONTACT_PANEL, CONTACT_NAME_Y, CONTACT_DETAIL_Y = two_line_row(
+    theme.font(15, "bold"), theme.font(11), ROW_PAD, ROW_GAP)
+CONTACT_ROW = CONTACT_PANEL + ROW_SPACING
+
+INBOX_PANEL, INBOX_NAME_Y, INBOX_DETAIL_Y = two_line_row(
+    theme.font(13, "bold"), theme.font(11), ROW_PAD, ROW_GAP)
+INBOX_ROW = INBOX_PANEL + ROW_SPACING
+
+SETTING_PANEL, SETTING_NAME_Y, SETTING_DETAIL_Y = two_line_row(
+    theme.font(14, "bold"), theme.font(11), ROW_PAD, ROW_GAP)
+SETTING_ROW = SETTING_PANEL + ROW_SPACING
 
 
 @dataclass
@@ -207,7 +225,7 @@ def draw_contacts(draw, state: ViewState):
         centred(draw, 130, "no contacts", theme.font(15), theme.TEXT_DIM)
         return
 
-    row_height = 38
+    row_height = CONTACT_ROW
     # One row of headroom is kept for the "n / m" counter when the list
     # is longer than the screen.
     visible = min(len(state.entries), (CONTENT_HEIGHT - 14) // row_height)
@@ -220,7 +238,7 @@ def draw_contacts(draw, state: ViewState):
         index = first + offset
         top = CONTENT_TOP + offset * row_height
         chosen = index == state.selected_index
-        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + row_height - 6],
+        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + CONTACT_PANEL],
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
               outline=theme.ACCENT if chosen else None)
 
@@ -241,7 +259,7 @@ def draw_contacts(draw, state: ViewState):
             dot, filled = theme.WARN, True
         else:
             dot, filled = theme.TEXT_FAINT, False
-        box = [16, top + 13, 24, top + 21]
+        box = [16, top + CONTACT_PANEL // 2 - 4, 24, top + CONTACT_PANEL // 2 + 4]
         if filled:
             draw.ellipse(box, fill=dot)
         else:
@@ -256,18 +274,18 @@ def draw_contacts(draw, state: ViewState):
         text_width = theme.SCREEN_WIDTH - 32 - MARGIN - 6 - rssi_width
 
         name_font = theme.font(15, "bold" if chosen else "regular")
-        draw.text((32, top + 4),
+        draw.text((32, top + CONTACT_NAME_Y),
                   ellipsise(draw, entry.name, name_font, text_width),
                   font=name_font, fill=theme.TEXT if chosen else theme.TEXT_DIM)
         detail = entry.status if entry.is_broadcast else \
             f"{entry.address} · {entry.status}"
-        draw.text((32, top + 20),
+        draw.text((32, top + CONTACT_DETAIL_Y),
                   ellipsise(draw, detail, small, text_width),
                   font=small, fill=theme.TEXT_FAINT)
 
         if rssi_text:
             draw.text((theme.SCREEN_WIDTH - MARGIN - 6 - rssi_width + 10,
-                       top + 11), rssi_text, font=small,
+                       top + CONTACT_PANEL // 2 - 7), rssi_text, font=small,
                       fill=theme.rssi_colour(entry.last_rssi))
 
     if len(state.entries) > visible:
@@ -384,7 +402,7 @@ def draw_inbox(draw, state: ViewState):
         draw_footer(draw, state, _hints(INBOX, inbox_empty=True))
         return
 
-    row_height = 40
+    row_height = INBOX_ROW
     visible = max(1, min(len(state.inbox), CONTENT_HEIGHT // row_height))
     first = max(0, min(state.inbox_index - visible // 2, len(state.inbox) - visible))
     first = max(0, first)
@@ -393,28 +411,29 @@ def draw_inbox(draw, state: ViewState):
         index = first + offset
         top = CONTENT_TOP + offset * row_height
         chosen = index == state.inbox_index
-        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + row_height - 6],
+        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + INBOX_PANEL],
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
               outline=theme.ACCENT if chosen else None)
 
         tint = theme.VOICE if item.kind == "voice" else theme.ACCENT
-        draw.rectangle([6, top, 10, top + row_height - 6], fill=tint)
+        draw.rectangle([6, top, 10, top + INBOX_PANEL], fill=tint)
         if not item.played and not item.outgoing:
-            draw.ellipse([theme.SCREEN_WIDTH - 22, top + 8,
-                          theme.SCREEN_WIDTH - 14, top + 16], fill=theme.OK)
+            draw.ellipse([theme.SCREEN_WIDTH - 22, top + 7,
+                          theme.SCREEN_WIDTH - 14, top + 15], fill=theme.OK)
 
         who = ("to " if item.outgoing else "") + (item.peer_name or f"node {item.src}")
         small = theme.font(10)
         when_width = int(draw.textlength(item.when, font=small)) + 8
         text_width = theme.SCREEN_WIDTH - 18 - MARGIN - when_width
-        draw.text((18, top + 4),
+        draw.text((18, top + INBOX_NAME_Y),
                   ellipsise(draw, who, theme.font(13, "bold"), text_width),
                   font=theme.font(13, "bold"), fill=theme.TEXT)
-        draw.text((18, top + 20),
+        draw.text((18, top + INBOX_DETAIL_Y),
                   ellipsise(draw, item.summary, theme.font(11), text_width),
                   font=theme.font(11),
                   fill=theme.WARN if item.incomplete else theme.TEXT_DIM)
-        draw.text((theme.SCREEN_WIDTH - MARGIN - when_width + 8, top + 21),
+        draw.text((theme.SCREEN_WIDTH - MARGIN - when_width + 8,
+                   top + INBOX_DETAIL_Y + 1),
                   item.when, font=small, fill=theme.TEXT_FAINT)
 
     draw_footer(draw, state, _hints(INBOX))
@@ -507,7 +526,7 @@ def draw_settings(draw, state: ViewState):
         centred(draw, 130, "no settings", theme.font(15), theme.TEXT_DIM)
         return
 
-    row_height = 38
+    row_height = SETTING_ROW
     visible = max(1, min(len(state.settings_items),
                          (CONTENT_HEIGHT - 14) // row_height))
     first = max(0, min(state.settings_index - visible // 2,
@@ -520,20 +539,20 @@ def draw_settings(draw, state: ViewState):
         chosen = index == state.settings_index
         # Destructive entries are tinted so they are never opened by reflex.
         accent = theme.DANGER if item.get("destructive") else theme.ACCENT
-        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + row_height - 6],
+        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + SETTING_PANEL],
               fill=theme.SURFACE_HI if chosen else theme.SURFACE,
               outline=accent if chosen else None)
 
         text_width = theme.SCREEN_WIDTH - 16 - MARGIN - 8
         name_font = theme.font(14, "bold" if chosen else "regular")
-        draw.text((16, top + 4),
+        draw.text((16, top + SETTING_NAME_Y),
                   ellipsise(draw, item["label"], name_font, text_width),
                   font=name_font,
                   fill=(theme.DANGER if item.get("destructive")
                         else (theme.TEXT if chosen else theme.TEXT_DIM)))
         value = str(item.get("value", ""))
         if value:
-            draw.text((16, top + 20),
+            draw.text((16, top + SETTING_DETAIL_Y),
                       ellipsise(draw, value, theme.font(11), text_width),
                       font=theme.font(11), fill=theme.TEXT_FAINT)
 

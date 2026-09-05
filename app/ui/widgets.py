@@ -9,6 +9,30 @@ def text_width(draw, text: str, font) -> int:
     return int(draw.textlength(text, font=font))
 
 
+def two_line_row(primary_font, secondary_font, pad: int = 4, gap: int = 1):
+    """Panel height and both text offsets for a name-over-detail row.
+
+    Measured from the fonts rather than assumed. The rows were hardcoded
+    at 32 px tall while a 15 px name over an 11 px detail needs 37, so
+    the second line was drawn across the bottom of its own selection
+    frame. Deriving it means changing a font cannot quietly reintroduce
+    that.
+
+    Returns (height, primary_y, secondary_y), the y values being offsets
+    from the top of the panel to pass straight to `draw.text`.
+    """
+    from PIL import Image, ImageDraw
+
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    top1, bottom1 = measure.textbbox((0, 0), "Ag", font=primary_font)[1::2]
+    top2, bottom2 = measure.textbbox((0, 0), "Ag", font=secondary_font)[1::2]
+
+    primary_y = pad - top1
+    secondary_y = pad + (bottom1 - top1) + gap - top2
+    height = secondary_y + bottom2 + pad
+    return height, primary_y, secondary_y
+
+
 def ellipsise(draw, text: str, font, max_width: int) -> str:
     if text_width(draw, text, font) <= max_width:
         return text

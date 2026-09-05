@@ -296,3 +296,58 @@ def test_stronger_signals_paint_more_bars(display):
                   if p not in (theme.BG, theme.SURFACE_HI))
         painted.append(lit)
     assert painted[0] < painted[1] < painted[2]
+
+
+# --- rows: text must stay inside its own selection frame ---------------
+@pytest.mark.parametrize("primary,secondary", [
+    (theme.font(15, "bold"), theme.font(11)),
+    (theme.font(13, "bold"), theme.font(11)),
+    (theme.font(14, "bold"), theme.font(11)),
+    (theme.font(12, "bold"), theme.font(10)),
+])
+def test_two_line_rows_fit_their_panel(primary, secondary):
+    """The detail line used to be drawn across the bottom border."""
+    from PIL import Image, ImageDraw
+
+    from app.ui.widgets import two_line_row
+
+    pad = 5
+    height, first_y, second_y = two_line_row(primary, secondary, pad=pad, gap=2)
+    draw = ImageDraw.Draw(Image.new("RGB", (240, 80)))
+
+    top = draw.textbbox((0, first_y), "Ag", font=primary)[1]
+    bottom = draw.textbbox((0, second_y), "Ag", font=secondary)[3]
+    assert top >= pad - 1, f"first line starts at {top}, above the padding"
+    assert bottom <= height - pad + 1, (
+        f"second line ends at {bottom}, panel is {height} tall")
+
+
+@pytest.mark.parametrize("screen", [CONTACTS, INBOX, SETTINGS])
+def test_row_text_does_not_cross_the_panel_border(display, screen):
+    """Render for real and check no text sits on a selection outline."""
+    import numpy as np
+
+    from app.ui import screens as scr
+
+    state = populated_state(screen=screen, settings_items=SETTINGS_ITEMS,
+                            selected_index=0, inbox_index=0, settings_index=0)
+    image, draw = display.new_canvas()
+    scr.RENDERERS[screen](draw, state)
+    arr = np.asarray(image.convert("RGB"))
+
+    panel_height = {CONTACTS: scr.CONTACT_PANEL, INBOX: scr.INBOX_PANEL,
+                    SETTINGS: scr.SETTING_PANEL}[screen]
+    row_height = {CONTACTS: scr.CONTACT_ROW, INBOX: scr.INBOX_ROW,
+                  SETTINGS: scr.SETTING_ROW}[screen]
+
+    # The gap between one panel's bottom and the next panel's top must be
+    # background: anything else is a row bleeding out of its frame.
+    for index in range(2):
+        gap_top = scr.CONTENT_TOP + index * row_height + panel_height + 2
+        gap_bottom = scr.CONTENT_TOP + (index + 1) * row_height - 1
+        if gap_bottom <= gap_top or gap_bottom >= scr.CONTENT_BOTTOM:
+            continue
+        band = arr[gap_top:gap_bottom, 12:theme.SCREEN_WIDTH - 12]
+        assert (band == np.array(theme.BG, dtype=arr.dtype)).all(), (
+            f"{screen}: something is drawn between rows {index} and "
+            f"{index + 1} (y {gap_top}-{gap_bottom})")
