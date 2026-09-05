@@ -50,6 +50,39 @@ ECHO = b"TE:"           # echo reply
 DEFAULT_SIZES = (11, 32, 64, 128, 193, 386, 965, 1930)
 
 
+def _hold_mode_pins(pins):
+    """Keep re-driving M0/M1 low, because something else keeps raising them.
+
+    The Whisplay LCD shares GPIO 22/27 with the module's mode pins and
+    writes them on every redraw, so setting the mode once at startup does
+    not survive. This re-asserts it continuously, which is enough to get
+    a bench measurement without stopping the display -- packets sent
+    during a redraw are still lost, so a clean run means stopping the
+    daemon, not this.
+    """
+    import RPi.GPIO as GPIO
+
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    for pin in pins:
+        GPIO.setup(pin, GPIO.OUT)
+
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                GPIO.output(pins[0], 0)
+                GPIO.output(pins[1], 0)
+            except Exception:
+                return
+            stop.wait(0.04)
+
+    thread = threading.Thread(target=loop, name="hold-mode-pins", daemon=True)
+    thread.start()
+    return stop
+
+
 def open_link(args, settings):
     mode_pins = None
     if args.mode_pins:
@@ -60,24 +93,40 @@ def open_link(args, settings):
     radio = SX126x(port=args.port, addr=args.address, freq_mhz=args.frequency,
                    uart_baud=settings.radio.uart_baud, mode_pins=mode_pins)
 
+    holder = None
     if mode_pins:
+        if args.hold:
+            holder = _hold_mode_pins(mode_pins)
+            time.sleep(0.4)
+
         health = modepins.sample(mode_pins[0], mode_pins[1], samples=8, seconds=0.5)
         if health["readable"] and not health["transparent"]:
-            print(f"! the module is in {health['mode']} mode "
-                  f"(M0=GPIO{mode_pins[0]} M1=GPIO{mode_pins[1]} read "
-                  f"{health['levels']}).")
-            print("  It will accept every byte over the UART and radiate none")
-            print("  of them. Fix the mode pins before trusting any result.")
+            where = f"M0=GPIO{mode_pins[0]} M1=GPIO{mode_pins[1]}"
+            if health["levels"] == (0, 0):
+                # Mostly right but not consistently: something else is
+                # writing these pins between our samples.
+                print(f"! the mode pins ({where}) keep changing under us -- only "
+                      f"{health['fraction'] * 100:.0f}% of samples were transparent.")
+                print("  The display daemon drives GPIO 22/27 for the LCD and will")
+                print("  put the module back into the wrong mode mid-test. Stop it:")
+                print("    sudo systemctl stop whisplay-daemon")
+            else:
+                print(f"! the module is in {health['mode']} mode "
+                      f"({where} read {health['levels']}).")
+                print("  It will accept every byte over the UART and radiate none")
+                print("  of them. Fix the mode pins before trusting any result.")
             if not args.force:
+                if holder:
+                    holder.set()
                 radio.close()
-                return None, None
+                return None, None, None
             print("  --force given: continuing anyway.\n")
 
     link = LoraLink(radio, air_speed=args.air_speed,
                     # A bench test must not be throttled by the hour's
                     # budget; airtime used is reported instead.
                     duty_cycle_percent=100.0, callsign=args.callsign)
-    return radio, link
+    return radio, link, holder
 
 
 def run_echo(link, args):
@@ -195,11 +244,15 @@ def main() -> int:
     parser.add_argument("--max-size", type=int, default=1930)
     parser.add_argument("--force", action="store_true",
                         help="run even if the mode pins say the radio is deaf")
+    parser.add_argument("--hold", action="store_true",
+                        help="keep re-driving M0/M1 low, for when the LCD "
+                             "daemon shares those pins and cannot be stopped")
     args = parser.parse_args()
 
     try:
-        radio, link = open_link(args, defaults)
+        radio, link, holder = open_link(args, defaults)
     except Exception as exc:
+        radio = link = holder = None
         print(f"! cannot open {args.port}: {exc}", file=sys.stderr)
         print("  the app holds the port; stop it with:", file=sys.stderr)
         print("    systemctl --user stop walkie-talkie.service", file=sys.stderr)
@@ -213,6 +266,8 @@ def main() -> int:
     finally:
         link.stop()
         radio.close()
+        if holder:
+            holder.set()
 
 
 if __name__ == "__main__":
