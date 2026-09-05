@@ -70,7 +70,9 @@ def main() -> int:
         line(PASS, f"serial port {args.port} opened at {defaults.radio.uart_baud} baud")
     except Exception as exc:
         line(FAIL, f"cannot open {args.port}", str(exc)
-             + "\nthe app holds it: systemctl --user stop walkie-talkie.service")
+             + "\nthe app holds it. It is launched by whisplay-daemon, not"
+             + "\nsystemd, so stopping the service is not enough:"
+             + "\n    pkill -f 'app[.]main'")
         return 1
 
     # 2. mode pins ------------------------------------------------------
@@ -86,35 +88,57 @@ def main() -> int:
 
             from app.radio import modepins
 
-            gpio = GPIO
             GPIO.setmode(GPIO.BCM)
             GPIO.setwarnings(False)
+            claimed = []
             stuck = []
             for pin in pins:
-                GPIO.setup(pin, GPIO.OUT)
+                try:
+                    GPIO.setup(pin, GPIO.OUT)
+                except Exception as exc:
+                    # lgpio refuses a pin another process holds through
+                    # gpiod. Note it and carry on: the rest of the test
+                    # still works, it just cannot choose the mode.
+                    claimed.append((pin, str(exc)))
+                    continue
                 for _ in range(3):
                     GPIO.output(pin, 0)
                     time.sleep(0.12)
                 if modepins.sample(pin, pin, samples=3, seconds=0.1)["levels"][0]:
                     stuck.append(pin)
-            pins_ok = not stuck
-            if pins_ok:
-                line(PASS, f"mode pins M0=GPIO{pins[0]} M1=GPIO{pins[1]} drive both ways")
-            else:
+
+            if claimed:
+                held = ", ".join(f"GPIO{pin}" for pin, _ in claimed)
+                line(WARN, f"{held} is held by another process",
+                     "Something already owns that line, so this test cannot set the\n"
+                     "mode. The app is launched by whisplay-daemon, not systemd, so\n"
+                     "stopping the service does not stop it -- use:\n"
+                     "    pkill -f 'app[.]main'")
+            elif stuck:
                 failures += 1
                 line(FAIL, "a mode pin will not go low",
                      f"GPIO{', GPIO'.join(str(p) for p in stuck)} stays high when driven low.\n"
                      "Something external is holding it: a fitted M0/M1 jumper (the LCD\n"
                      "drives GPIO 22/27), a mis-wired lead, or a pin that cannot sink it.\n"
                      "The module cannot leave configuration mode until this is fixed.")
+            else:
+                pins_ok = True
+                gpio = GPIO
+                line(PASS, f"mode pins M0=GPIO{pins[0]} M1=GPIO{pins[1]} drive both ways")
         except Exception as exc:
             line(WARN, "could not test the mode pins", str(exc))
 
     def mode(m0, m1):
-        if gpio and pins:
+        """Set the mode, if we own the pins. Never raise: this is a test."""
+        if not (gpio and pins and pins_ok):
+            return False
+        try:
             gpio.output(pins[0], m0)
             gpio.output(pins[1], m1)
             time.sleep(0.15)
+            return True
+        except Exception:
+            return False
 
     def ask(command, wait=0.5):
         port.reset_input_buffer()
@@ -124,7 +148,8 @@ def main() -> int:
         return port.read(port.in_waiting) if port.in_waiting else b""
 
     # 3-5. configuration mode -------------------------------------------
-    mode(0, 1)
+    if not mode(0, 1):
+        line(INFO, "cannot set the mode; probing whatever the module is in")
     registers = ask([0xC1, 0x00, 0x09])
     if len(registers) >= 12 and registers[0] == 0xC1:
         line(PASS, "module answers in configuration mode",
@@ -161,7 +186,9 @@ def main() -> int:
         failures += 1
         line(FAIL, "no answer in configuration mode",
              f"got {registers.hex(' ') if registers else 'nothing'}\n"
-             + ("M1 is stuck high, so the module never entered configuration mode"
+             + ("could not set the mode, and the module is not already in one\n"
+                "that answers -- with the M0/M1 jumpers off its mode pins float\n"
+                "to the HAT's pull-ups, which is sleep: deaf and mute"
                 if not pins_ok else
                 "check the HAT is seated, powered, and on the right UART"))
 
