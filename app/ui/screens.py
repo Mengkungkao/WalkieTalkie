@@ -22,6 +22,9 @@ INBOX = "inbox"
 STATUS = "status"
 SETTINGS = "settings"
 PAIR = "pair"
+# The menu the app opens on, and the one that picks who to talk to.
+HOME = "home"
+START = "start"
 # An editor is modal: it owns every gesture while it is open, so it is a
 # screen rather than an overlay on one.
 EDIT = "edit"
@@ -69,15 +72,27 @@ SETTING_ROW = SETTING_PANEL + ROW_SPACING
 class ViewState:
     """Everything the screens are allowed to know."""
 
-    screen: str = CONTACTS
+    screen: str = HOME
     radio_state: str = IDLE
     callsign: str = ""
     address: int = 0
+    channel: int = 1
     frequency_mhz: int = 868
 
+    home_items: list = field(default_factory=list)
+    home_index: int = 0
+    start_items: list = field(default_factory=list)
+    start_index: int = 0
+
+    # Paired devices, and which of them have no keys (legacy contacts).
     entries: list = field(default_factory=list)
     selected_index: int = 0
+    unpaired: set = field(default_factory=set)
+
+    # Who holding the button talks to.
     target_name: str = ""
+    target_address: int = 0xFFFF
+    target_heard: str = ""
 
     record_level: float = 0.0
     record_seconds: float = 0.0
@@ -225,10 +240,13 @@ def draw_footer(draw, state: ViewState, lines: list):
 
 # --- contacts ----------------------------------------------------------
 def draw_contacts(draw, state: ViewState):
-    draw_header(draw, state, "CONTACTS")
+    draw_header(draw, state, "PAIRED")
 
     if not state.entries:
-        centred(draw, 130, "no contacts", theme.font(15), theme.TEXT_DIM)
+        centred(draw, 110, "no paired radios yet", theme.font(15), theme.TEXT_DIM)
+        centred(draw, 134, "Home > Pair devices, on", theme.font(12), theme.TEXT_FAINT)
+        centred(draw, 152, "both radios", theme.font(12), theme.TEXT_FAINT)
+        draw_footer(draw, state, _hints(CONTACTS))
         return
 
     row_height = CONTACT_ROW
@@ -283,8 +301,12 @@ def draw_contacts(draw, state: ViewState):
         draw.text((32, top + CONTACT_NAME_Y),
                   ellipsise(draw, entry.name, name_font, text_width),
                   font=name_font, fill=theme.TEXT if chosen else theme.TEXT_DIM)
-        detail = entry.status if entry.is_broadcast else \
-            f"{entry.address} · {entry.status}"
+        if entry.is_broadcast:
+            detail = entry.status
+        elif entry.address in state.unpaired:
+            detail = f"{entry.address} · not paired: pair again"
+        else:
+            detail = f"{entry.address} · {entry.status}"
         draw.text((32, top + CONTACT_DETAIL_Y),
                   ellipsise(draw, detail, small, text_width),
                   font=small, fill=theme.TEXT_FAINT)
@@ -358,13 +380,11 @@ def draw_talk(draw, state: ViewState):
         meter(draw, bar,
               state.tx_sent / state.tx_total if state.tx_total else 0.0, theme.WARN)
     else:
-        detail = f"codec2 {state.codec_name}  ·  {state.frequency_mhz} MHz"
+        detail = f"channel {state.channel}  ·  encrypted"
         colour = theme.TEXT_FAINT
-        if state.entries and state.selected_index < len(state.entries):
-            entry = state.entries[state.selected_index]
-            if (state.link_states.get(entry.address) == "stale"
-                    and not entry.is_broadcast):
-                detail = f"connected  ·  last heard {entry.status}"
+        link = state.link_states.get(state.target_address)
+        if link == "stale" and state.target_address != 0xFFFF:
+            detail = f"connected  ·  last heard {state.target_heard}"
         if state.radio_deaf:
             # Worth shouting about: everything else looks like it works.
             detail = "RADIO DEAF — check M0/M1 jumpers"
@@ -375,10 +395,6 @@ def draw_talk(draw, state: ViewState):
         elif not state.target_linked:
             # Shown here rather than beside the disc, where it collided
             # with the ring at this font size.
-            link = None
-            if state.entries and state.selected_index < len(state.entries):
-                link = state.link_states.get(
-                    state.entries[state.selected_index].address)
             detail, colour = {
                 "calling": ("calling…", theme.WARN),
                 "rejected": ("refused the link", theme.DANGER),
@@ -400,11 +416,12 @@ def draw_talk(draw, state: ViewState):
 
 # --- inbox -------------------------------------------------------------
 def draw_inbox(draw, state: ViewState):
-    draw_header(draw, state, f"INBOX{f'  ({state.unread})' if state.unread else ''}")
+    draw_header(draw, state, f"RECEIVE{f'  ({state.unread})' if state.unread else ''}")
 
     if not state.inbox:
         centred(draw, 120, "nothing received yet", theme.font(14), theme.TEXT_DIM)
-        centred(draw, 142, "the radio is listening", theme.font(12), theme.TEXT_FAINT)
+        centred(draw, 142, f"listening on channel {state.channel}",
+                theme.font(12), theme.TEXT_FAINT)
         draw_footer(draw, state, _hints(INBOX, inbox_empty=True))
         return
 
@@ -456,8 +473,8 @@ def draw_status(draw, state: ViewState):
     # cost a line each and make the screen scannable instead.
     groups = [
         ("STATION", [
-            ("call", state.callsign or "-"),
-            ("addr", str(state.address)),
+            ("name", state.callsign or "-"),
+            ("id", f"{state.address}  ·  channel {state.channel}  ·  encrypted"),
             ("freq", f"{state.frequency_mhz} MHz  ·  codec2 {state.codec_name}"),
         ]),
         ("LINK", [
@@ -524,25 +541,27 @@ def _hints(screen: str, inbox_empty: bool = False) -> list:
     return navigation.hints(screen, inbox_empty)
 
 
-# --- settings ----------------------------------------------------------
-def draw_settings(draw, state: ViewState):
-    draw_header(draw, state, "SETTINGS")
+# --- menus -------------------------------------------------------------
+def draw_menu(draw, state: ViewState, screen: str, title: str, items: list,
+              selected: int, top_offset: int = 0):
+    """A list of two-line rows to pick from: Home, Start and Settings."""
+    draw_header(draw, state, title)
 
-    if not state.settings_items:
-        centred(draw, 130, "no settings", theme.font(15), theme.TEXT_DIM)
+    if not items:
+        centred(draw, 130, "nothing here", theme.font(15), theme.TEXT_DIM)
+        draw_footer(draw, state, _hints(screen))
         return
 
+    list_top = CONTENT_TOP + top_offset
     row_height = SETTING_ROW
-    visible = max(1, min(len(state.settings_items),
-                         (CONTENT_HEIGHT - 14) // row_height))
-    first = max(0, min(state.settings_index - visible // 2,
-                       len(state.settings_items) - visible))
-    first = max(0, first)
+    selected %= len(items)
+    visible = max(1, min(len(items), (CONTENT_BOTTOM - list_top - 14) // row_height))
+    first = max(0, min(selected - visible // 2, len(items) - visible))
 
-    for offset, item in enumerate(state.settings_items[first:first + visible]):
+    for offset, item in enumerate(items[first:first + visible]):
         index = first + offset
-        top = CONTENT_TOP + offset * row_height
-        chosen = index == state.settings_index
+        top = list_top + offset * row_height
+        chosen = index == selected
         # Destructive entries are tinted so they are never opened by reflex.
         accent = theme.DANGER if item.get("destructive") else theme.ACCENT
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + SETTING_PANEL],
@@ -562,12 +581,29 @@ def draw_settings(draw, state: ViewState):
                       ellipsise(draw, value, theme.font(11), text_width),
                       font=theme.font(11), fill=theme.TEXT_FAINT)
 
-    if len(state.settings_items) > visible:
-        centred(draw, CONTENT_TOP + visible * row_height,
-                f"{state.settings_index + 1} / {len(state.settings_items)}",
-                theme.font(11), theme.TEXT_FAINT)
+    if len(items) > visible:
+        centred(draw, list_top + visible * row_height,
+                f"{selected + 1} / {len(items)}", theme.font(11), theme.TEXT_FAINT)
 
-    draw_footer(draw, state, _hints(SETTINGS))
+    draw_footer(draw, state, _hints(screen))
+
+
+def draw_home(draw, state: ViewState):
+    small = theme.font(11)
+    me = f"{state.callsign or 'this radio'}  ·  ID {state.address}  ·  ch {state.channel}"
+    draw_menu(draw, state, HOME, "WALKIE", state.home_items, state.home_index,
+              top_offset=18)
+    centred(draw, CONTENT_TOP, ellipsise(draw, me, small, theme.SCREEN_WIDTH - 2 * MARGIN),
+            small, theme.TEXT_DIM)
+
+
+def draw_start(draw, state: ViewState):
+    draw_menu(draw, state, START, "START", state.start_items, state.start_index)
+
+
+def draw_settings(draw, state: ViewState):
+    draw_menu(draw, state, SETTINGS, "SETTINGS", state.settings_items,
+              state.settings_index)
 
 
 # --- pairing -----------------------------------------------------------
@@ -586,7 +622,7 @@ def draw_pair(draw, state: ViewState):
     list_top = CONTENT_TOP + 38
     if not state.pair_found:
         for index, line in enumerate(("On the other radio, open",
-                                      "Settings > Pair device too.")):
+                                      "Home > Pair devices too.")):
             centred(draw, list_top + 34 + index * 18, line, theme.font(12),
                     theme.TEXT_FAINT)
         draw_footer(draw, state, _hints(PAIR))
@@ -684,12 +720,12 @@ def draw_editor(draw, state: ViewState):
 RENDERERS = {
     CONTACTS: draw_contacts, TALK: draw_talk, INBOX: draw_inbox,
     STATUS: draw_status, SETTINGS: draw_settings, EDIT: draw_editor,
-    PAIR: draw_pair,
+    PAIR: draw_pair, HOME: draw_home, START: draw_start,
 }
 
 
 def render(display, state: ViewState):
     """Draw the current screen and push it if it changed."""
     image, draw = display.new_canvas()
-    RENDERERS.get(state.screen, draw_contacts)(draw, state)
+    RENDERERS.get(state.screen, draw_home)(draw, state)
     return display.present(image)

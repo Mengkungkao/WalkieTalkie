@@ -27,6 +27,9 @@ class RadioSettings:
     # This radio's Device ID. None ("auto" in config.yaml) means pick an
     # unused one on first start and keep it; see overrides.apply.
     address: int | None = None
+    # Radios on different privacy channels share the frequency but ignore
+    # each other, like the privacy codes on a handheld walkie-talkie.
+    privacy_channel: int = 1
     frequency_mhz: int = 868
     air_speed: int = 9600
     power_dbm: int = 22
@@ -253,6 +256,16 @@ def load(path: str | None = None) -> Settings:
             "traffic as its own echo. Give every node a unique address.",
             settings.radio.address, ", ".join(clashing),
         )
+
+    try:
+        channel = int(settings.radio.privacy_channel)
+    except (TypeError, ValueError):
+        channel = 0
+    if channel not in range(1, 17):
+        log.warning("radio.privacy_channel %r is not 1-16; using 1",
+                    settings.radio.privacy_channel)
+        channel = 1
+    settings.radio.privacy_channel = channel
 
     if settings.radio.mode_pins and len(settings.radio.mode_pins) != 2:
         log.warning("radio.mode_pins must be [M0, M1]; ignoring %r",

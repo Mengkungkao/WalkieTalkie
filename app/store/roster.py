@@ -1,18 +1,15 @@
-"""The paired-device list the app opens on.
+"""The paired devices: Start > To a paired device.
 
-Two sources feed one list:
+Only contacts are listed -- radios paired from the app, plus any in
+config.yaml -- and always in the same order, even when the other radio
+is switched off, because you need to be able to select a station before
+you can call it. What is heard on the air only fills in when each was
+last heard and how strongly.
 
-* **config.yaml contacts** -- devices you deliberately paired, with a
-  name you chose. These are always shown, in order, even when the other
-  radio is switched off, because you need to be able to select a peer
-  before you can call it.
-* **peers heard on the air** -- anything that has transmitted to us and
-  is not already a contact. LoRa has no discovery protocol, so this is
-  the closest thing to one: a station that says hello shows up, and can
-  be replied to without editing any config.
-
-`ALL STATIONS` is always first: broadcast is the walkie-talkie default,
-and pressing talk without choosing anyone should reach everybody.
+Stations that were heard but never paired used to be listed too. With
+encryption there is nothing to say to them -- no key to seal a message
+with, and nothing of theirs we would open -- so they are not. ALL is not
+a row here either: it has its own entry on the Start menu.
 """
 
 from __future__ import annotations
@@ -112,8 +109,7 @@ class Roster:
 
     # --- view ----------------------------------------------------------
     def entries(self) -> list:
-        out = [Entry(name=BROADCAST_NAME, address=BROADCAST, known=True)]
-        placed = {BROADCAST}
+        out = []
         for contact in self._configured:
             record = self._seen.get(contact.address, {})
             out.append(Entry(
@@ -121,28 +117,22 @@ class Roster:
                 last_heard=record.get("last_heard", 0.0),
                 last_rssi=record.get("last_rssi"),
             ))
-            placed.add(contact.address)
-        # Discovered stations, most recently heard first.
-        extras = [
-            (addr, record) for addr, record in self._seen.items()
-            if addr not in placed
-        ]
-        extras.sort(key=lambda item: item[1].get("last_heard", 0.0), reverse=True)
-        for addr, record in extras:
-            out.append(Entry(
-                name=record.get("name") or f"node {addr}", address=addr,
-                known=False, last_heard=record.get("last_heard", 0.0),
-                last_rssi=record.get("last_rssi"),
-            ))
         return out
 
-    def selected(self) -> Entry:
+    def entry(self, addr: int) -> Entry | None:
+        return next((e for e in self.entries() if e.address == addr), None)
+
+    def selected(self) -> Entry | None:
         entries = self.entries()
+        if not entries:
+            return None
         self.selected_index %= len(entries)
         return entries[self.selected_index]
 
-    def advance(self, step: int = 1) -> Entry:
+    def advance(self, step: int = 1) -> Entry | None:
         entries = self.entries()
+        if not entries:
+            return None
         self.selected_index = (self.selected_index + step) % len(entries)
         return entries[self.selected_index]
 

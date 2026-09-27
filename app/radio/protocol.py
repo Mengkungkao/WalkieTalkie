@@ -3,25 +3,30 @@
 Layered on top of `framing`:
 
     [FF FF chan]  <- eaten by the module: always a module broadcast
-    [ COBS( header(9) || body || crc16 ) 0x00 ]
+    [ COBS( header(10) || body || crc16 ) 0x00 ]
 
-The 9-byte header carries the sender's address, because in fixed
-transmission mode the module tells the receiver nothing about who sent
-a packet. The stock Waveshare example solves this by prefixing three
-plaintext bytes to the payload; we fold the same information into the
-framed header instead, so a source address containing 0x00 cannot be
-mistaken for a frame delimiter.
+    header: ver+type | channel+sealing | src(2) | dst(2) | msg_id | seq | total | flags
 
-It also carries the destination, which is version 2's one change.
-Version 1 left that to the module: each module dropped packets not
-addressed to the number in its own registers. Those registers can only
-be written with the mode pins -- which the Whisplay LCD owns, and which
-an Orange Pi cannot drive at all -- so a Device ID changed in Settings
-never took effect, and pairing could not assign one. Now every packet
-goes out as a module broadcast, every radio on the channel hears it,
-and `Packet.addressed_to` does the filtering in software. The module's
-own address no longer matters. (That was never privacy: any module on
-the channel can already listen to everything.)
+The header carries the sender's address, because in fixed transmission
+mode the module tells the receiver nothing about who sent a packet, and
+the destination, because the module's own address filter is not used:
+every packet goes out as a module broadcast, every radio hears it, and
+`Packet.addressed_to` does the filtering in software. That is what lets
+a Device ID be set in the app -- the module's registers can only be
+rewritten with the mode pins, which the Whisplay LCD owns on a Pi and an
+Orange Pi cannot drive at all.
+
+Version 3 adds two things to the second byte:
+
+* **A privacy channel** (low six bits). Like the privacy codes on a
+  handheld walkie-talkie, radios set to different channels share the
+  frequency but ignore each other completely.
+* **How the body is sealed** (top two bits): in the clear, with a
+  pairwise key, or with the sender's broadcast key; see `crypto`. Only
+  the messages that agree keys may travel in the clear.
+
+Every radio has to run the same version: an older radio's packets are
+not understood, and it does not understand ours.
 
 Messages larger than one packet are split into fragments sharing a
 `msg_id`, numbered `seq` of `total`. There are no retransmissions on the
@@ -38,15 +43,20 @@ from dataclasses import dataclass, field
 
 from app.radio.framing import MAX_FRAME_PAYLOAD
 
-VERSION = 2
-HEADER = struct.Struct(">BHHBBBB")  # ver_type, src, dst, msg_id, seq, total, flags
-HEADER_SIZE = HEADER.size  # 9
-MAX_BODY = MAX_FRAME_PAYLOAD - HEADER_SIZE  # 191
+VERSION = 3
+HEADER = struct.Struct(">BBHHBBBB")  # ver_type, chan_seal, src, dst, msg_id, seq, total, flags
+HEADER_SIZE = HEADER.size  # 10
+MAX_BODY = MAX_FRAME_PAYLOAD - HEADER_SIZE  # 190
 
-# Version 1 had no destination: the module's address register filtered
-# for it. Still decoded, so a radio that has not been updated yet is
-# heard rather than silently ignored -- though it cannot hear us.
-V1_HEADER = struct.Struct(">BHBBBB")  # ver_type, src, msg_id, seq, total, flags
+# How a body is sealed: the top two bits of the second header byte.
+CLEAR = 0
+PAIRWISE = 1  # with the key only the sender and the destination hold
+SENDER = 2  # with the sender's broadcast key, held by everyone it paired with
+
+# The privacy channel: the low six bits of the same byte.
+DEFAULT_CHANNEL = 1
+CHANNELS = range(1, 17)  # what Settings offers
+_CHANNEL_MASK = 0x3F
 
 # Message types
 HELLO = 0x0  # "I am here" -- body is the operator's display name
@@ -56,17 +66,26 @@ ACK = 0x3  # body is the acknowledged msg_id
 BYE = 0x4  # leaving the channel
 HELLO_ACK = 0x5  # "I hear you, and I accept" -- body is our name
 REJECT = 0x6  # "I hear you, and I do not accept"
-PAIR = 0x7  # "I am pairing" -- body is a node token, then the name
+PAIR = 0x7  # "I am pairing" -- token, public key, name
+PAIR_REQUEST = 0x8  # "pair with me" -- public key, then our secrets sealed for you
+PAIR_ACCEPT = 0x9  # "yes" -- the same, back
 
 TYPE_NAMES = {HELLO: "hello", TEXT: "text", VOICE: "voice", ACK: "ack",
               BYE: "bye", HELLO_ACK: "hello-ack", REJECT: "reject",
-              PAIR: "pair"}
+              PAIR: "pair", PAIR_REQUEST: "pair-request",
+              PAIR_ACCEPT: "pair-accept"}
+
+# The only types that may travel in the clear: they are how two radios
+# agree keys in the first place, or say no. Everything else from a radio
+# we have not paired with is dropped unread.
+CLEAR_TYPES = frozenset({PAIR, PAIR_REQUEST, PAIR_ACCEPT, REJECT})
 
 # A random number each installation picks once. Two radios that ended up
 # with the same Device ID are indistinguishable by address alone -- each
 # drops the other's packets as its own echo -- but not by token, so the
 # pairing beacon carries one and a clash can be seen and fixed.
 TOKEN_SIZE = 4
+PUBLIC_SIZE = 32
 
 # A station is "linked" once it has both heard us and answered. Presence
 # alone is not enough: hearing someone does not prove they hear you, and
@@ -108,74 +127,92 @@ class Packet:
     flags: int
     body: bytes
     rssi_dbm: int | None = None
-    # None for a version-1 packet, whose destination only its sender's
-    # module knew -- ours delivered it, so it was meant for us.
-    dst: int | None = BROADCAST
+    dst: int = BROADCAST
+    channel: int = DEFAULT_CHANNEL
+    sealing: int = CLEAR
+    # The header exactly as received: a sealed body is authenticated
+    # against it, so it cannot be rebuilt from the fields.
+    header: bytes = b""
 
     @property
     def type_name(self) -> str:
         return TYPE_NAMES.get(self.type, f"0x{self.type:x}")
 
     def addressed_to(self, addr: int) -> bool:
-        return self.dst is None or self.dst in (addr, BROADCAST)
+        return self.dst in (addr, BROADCAST)
 
 
-def encode(type_: int, src: int, msg_id: int, seq: int, total: int,
-           body: bytes, flags: int = 0, dst: int = BROADCAST) -> bytes:
-    if len(body) > MAX_BODY:
-        raise ValueError(f"body {len(body)} B exceeds {MAX_BODY} B per fragment")
-    head = HEADER.pack(
+def encode_header(type_: int, src: int, msg_id: int, seq: int, total: int,
+                  flags: int = 0, dst: int = BROADCAST,
+                  channel: int = DEFAULT_CHANNEL, sealing: int = CLEAR) -> bytes:
+    return HEADER.pack(
         ((VERSION & 0xF) << 4) | (type_ & 0xF),
+        ((sealing & 0x3) << 6) | (channel & _CHANNEL_MASK),
         src & 0xFFFF, dst & 0xFFFF, msg_id & 0xFF, seq & 0xFF, total & 0xFF,
         flags & 0xFF,
     )
-    return head + body
+
+
+def encode(type_: int, src: int, msg_id: int, seq: int, total: int,
+           body: bytes, flags: int = 0, dst: int = BROADCAST,
+           channel: int = DEFAULT_CHANNEL, sealing: int = CLEAR) -> bytes:
+    if len(body) > MAX_BODY:
+        raise ValueError(f"body {len(body)} B exceeds {MAX_BODY} B per fragment")
+    return encode_header(type_, src, msg_id, seq, total, flags, dst,
+                         channel, sealing) + body
 
 
 def decode(payload: bytes, rssi_dbm: int | None = None) -> Packet | None:
     """Parse one framed payload. None if it is not a packet we understand."""
-    if not payload:
-        return None
-    version = payload[0] >> 4
-    if version == VERSION and len(payload) >= HEADER_SIZE:
-        ver_type, src, dst, msg_id, seq, total, flags = HEADER.unpack_from(payload)
-        body = payload[HEADER_SIZE:]
-    elif version == 1 and len(payload) >= V1_HEADER.size:
-        ver_type, src, msg_id, seq, total, flags = V1_HEADER.unpack_from(payload)
-        dst, body = None, payload[V1_HEADER.size:]
-    else:
-        return None  # a future or foreign sender; ignore rather than guess
+    if len(payload) < HEADER_SIZE or (payload[0] >> 4) != VERSION:
+        return None  # an older, future or foreign sender; ignore rather than guess
+    ver_type, chan_seal, src, dst, msg_id, seq, total, flags = HEADER.unpack_from(payload)
     if total == 0 or seq >= total:
         return None
     return Packet(
         type=ver_type & 0xF, src=src, msg_id=msg_id, seq=seq, total=total,
-        flags=flags, body=body, rssi_dbm=rssi_dbm, dst=dst,
+        flags=flags, body=payload[HEADER_SIZE:], rssi_dbm=rssi_dbm, dst=dst,
+        channel=chan_seal & _CHANNEL_MASK, sealing=chan_seal >> 6,
+        header=bytes(payload[:HEADER_SIZE]),
     )
 
 
 def fragment(type_: int, src: int, msg_id: int, body: bytes,
-             flags: int = 0, dst: int = BROADCAST) -> list[bytes]:
-    """Split `body` into ready-to-frame packets."""
-    chunks = [body[i:i + MAX_BODY] for i in range(0, len(body), MAX_BODY)] or [b""]
+             flags: int = 0, dst: int = BROADCAST,
+             channel: int = DEFAULT_CHANNEL, seal=None, sealing: int = CLEAR,
+             overhead: int = 0) -> list[bytes]:
+    """Split `body` into ready-to-frame packets.
+
+    With `seal` -- a function (header, chunk) -> sealed body adding
+    `overhead` bytes -- each fragment is sealed on its own, so a lost
+    fragment never makes the others unreadable.
+    """
+    size = MAX_BODY - overhead
+    chunks = [body[i:i + size] for i in range(0, len(body), size)] or [b""]
     total = len(chunks)
     if total > 255:
         raise ValueError(f"message needs {total} fragments; limit is 255")
-    return [
-        encode(type_, src, msg_id, seq, total, chunk, flags, dst)
-        for seq, chunk in enumerate(chunks)
-    ]
+    packets = []
+    for seq, chunk in enumerate(chunks):
+        header = encode_header(type_, src, msg_id, seq, total, flags, dst,
+                               channel, sealing)
+        packets.append(header + (seal(header, chunk) if seal else chunk))
+    return packets
 
 
-def pair_body(token: bytes, name: str) -> bytes:
-    """What a pairing beacon carries: our token, then our name."""
+def pair_body(token: bytes, public: bytes, name: str) -> bytes:
+    """What a pairing beacon carries: token, public key, then name."""
     token = bytes(token[:TOKEN_SIZE]).ljust(TOKEN_SIZE, b"\0")
-    return token + name.encode("utf-8")[: MAX_BODY - TOKEN_SIZE]
+    public = bytes(public[:PUBLIC_SIZE]).ljust(PUBLIC_SIZE, b"\0")
+    limit = MAX_BODY - TOKEN_SIZE - PUBLIC_SIZE
+    return token + public + name.encode("utf-8")[:limit]
 
 
 def parse_pair(body: bytes) -> tuple:
-    """(token, name) from a pairing beacon's body."""
-    name = body[TOKEN_SIZE:].decode("utf-8", "replace").strip()[:20]
-    return bytes(body[:TOKEN_SIZE]), name
+    """(token, public key, name) from a pairing beacon's body."""
+    start = TOKEN_SIZE + PUBLIC_SIZE
+    name = body[start:].decode("utf-8", "replace").strip()[:20]
+    return bytes(body[:TOKEN_SIZE]), bytes(body[TOKEN_SIZE:start]), name
 
 
 @dataclass
@@ -185,7 +222,7 @@ class _Partial:
     src: int
     type: int
     started: float
-    dst: int | None = BROADCAST
+    dst: int = BROADCAST
     best_rssi: int | None = None
     chunks: dict = field(default_factory=dict)
 
@@ -210,7 +247,7 @@ class Message:
     missing: list
     rssi_dbm: int | None
     received_at: float
-    dst: int | None = BROADCAST
+    dst: int = BROADCAST
 
     @property
     def complete(self) -> bool:

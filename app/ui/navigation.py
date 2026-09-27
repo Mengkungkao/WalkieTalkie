@@ -23,16 +23,17 @@ play.
 from __future__ import annotations
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
-from app.ui.screens import CONTACTS, EDIT, INBOX, PAIR, SETTINGS, STATUS, TALK
+from app.ui.screens import (CONTACTS, EDIT, HOME, INBOX, PAIR, SETTINGS, START,
+                            STATUS, TALK)
 
 # Actions the app implements. Names, not callables, so this module stays
 # free of app state and can be imported by the screens.
+NEXT_ITEM = "next_item"          # Home and Start
+OPEN_ITEM = "open_item"
 NEXT_CONTACT = "next_contact"
 OPEN_TALK = "open_talk"
 OPEN_INBOX = "open_inbox"
 OPEN_STATUS = "open_status"
-BACK_CONTACTS = "back_contacts"
-BACK_TALK = "back_talk"
 NEXT_MESSAGE = "next_message"
 PLAY_SELECTED = "play_selected"
 REPLAY_LAST = "replay_last"
@@ -41,61 +42,76 @@ NEXT_SETTING = "next_setting"
 OPEN_SETTING = "open_setting"
 NEXT_FOUND = "next_found"
 PAIR_SELECTED = "pair_selected"
-BACK_SETTINGS = "back_settings"
+# Back to wherever this screen was opened from. One action rather than a
+# "back to X" per screen, because Talk, Receive and Settings can each be
+# reached from more than one place.
+GO_BACK = "go_back"
 EXIT_APP = "exit_app"
 
 # Screens you pick from, rather than screens you are in. Two clicks opens
 # a row here and leaves everywhere else.
-MENU_SCREENS = (CONTACTS, SETTINGS, PAIR)
+MENU_SCREENS = (HOME, START, CONTACTS, SETTINGS, PAIR)
 
 # Actions that move to a different screen. Used to check that no screen
 # can strand the operator.
 LEAVING_ACTIONS = {
-    OPEN_TALK, OPEN_INBOX, OPEN_STATUS, OPEN_SETTINGS,
-    BACK_CONTACTS, BACK_TALK, BACK_SETTINGS, EXIT_APP,
+    OPEN_ITEM, OPEN_TALK, OPEN_INBOX, OPEN_STATUS, OPEN_SETTINGS,
+    GO_BACK, EXIT_APP,
 }
 
 # gesture -> (action, short label for the on-screen hint)
 SCREEN_ACTIONS = {
-    CONTACTS: {
-        SINGLE: (NEXT_CONTACT, "next"),
-        DOUBLE: (OPEN_TALK, "open"),
+    # The app opens here. There is nowhere to go back to, so three clicks
+    # shows Status, as it did from the old contacts screen.
+    HOME: {
+        SINGLE: (NEXT_ITEM, "next"),
+        DOUBLE: (OPEN_ITEM, "open"),
         TRIPLE: (OPEN_STATUS, "status"),
     },
+    START: {
+        SINGLE: (NEXT_ITEM, "next"),
+        DOUBLE: (OPEN_ITEM, "open"),
+        TRIPLE: (GO_BACK, "back"),
+    },
+    CONTACTS: {
+        SINGLE: (NEXT_CONTACT, "next"),
+        DOUBLE: (OPEN_TALK, "talk"),
+        TRIPLE: (GO_BACK, "back"),
+    },
     TALK: {
-        SINGLE: (OPEN_INBOX, "inbox"),
-        DOUBLE: (BACK_CONTACTS, "back"),
+        SINGLE: (OPEN_INBOX, "receive"),
+        DOUBLE: (GO_BACK, "back"),
         TRIPLE: (REPLAY_LAST, "replay"),
     },
     INBOX: {
         SINGLE: (NEXT_MESSAGE, "next"),
-        DOUBLE: (BACK_TALK, "back"),
+        DOUBLE: (GO_BACK, "back"),
         TRIPLE: (PLAY_SELECTED, "play"),
     },
     STATUS: {
-        SINGLE: (BACK_CONTACTS, "back"),
-        DOUBLE: (BACK_CONTACTS, "back"),
+        SINGLE: (GO_BACK, "back"),
+        DOUBLE: (GO_BACK, "back"),
         TRIPLE: (OPEN_SETTINGS, "settings"),
     },
     SETTINGS: {
         SINGLE: (NEXT_SETTING, "next"),
         DOUBLE: (OPEN_SETTING, "open"),
-        TRIPLE: (BACK_CONTACTS, "back"),
+        TRIPLE: (GO_BACK, "back"),
     },
     # A menu of the radios heard pairing: two clicks picks one.
     PAIR: {
         SINGLE: (NEXT_FOUND, "next"),
         DOUBLE: (PAIR_SELECTED, "pair"),
-        TRIPLE: (BACK_SETTINGS, "back"),
+        TRIPLE: (GO_BACK, "back"),
     },
 }
 
 # An empty inbox has nothing to step through and nothing to play, so
 # every click leaves rather than silently doing nothing.
 EMPTY_INBOX_ACTIONS = {
-    SINGLE: (BACK_TALK, "back"),
-    DOUBLE: (BACK_TALK, "back"),
-    TRIPLE: (BACK_TALK, "back"),
+    SINGLE: (GO_BACK, "back"),
+    DOUBLE: (GO_BACK, "back"),
+    TRIPLE: (GO_BACK, "back"),
 }
 
 # Four clicks exits from anywhere, and hold always talks. Neither is
@@ -119,7 +135,7 @@ def actions(screen: str, inbox_empty: bool = False) -> dict:
     if screen == INBOX and inbox_empty:
         table = dict(EMPTY_INBOX_ACTIONS)
     else:
-        table = dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[CONTACTS]))
+        table = dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[HOME]))
     table.update(GLOBAL_ACTIONS)
     return table
 

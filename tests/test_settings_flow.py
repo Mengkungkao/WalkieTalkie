@@ -87,7 +87,7 @@ def play(app, *gestures):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["pair", "device_id", "base", "add", "clock", "reset"]
+    assert keys == ["name", "device_id", "channel", "base", "clock", "reset"]
     assert app.state.screen == SETTINGS
 
 
@@ -97,11 +97,8 @@ def test_opening_a_setting_enters_an_editor(app):
 
 
 def test_every_settings_row_opens_without_error(app):
-    """Every row but Pair device, which opens a screen (see test_pairing)."""
     app._open_settings()
     for index, item in enumerate(app.state.settings_items):
-        if item["key"] == "pair":
-            continue
         app.state.settings_index = index
         app._open_setting()
         assert app.state.screen == EDIT
@@ -138,24 +135,24 @@ def test_device_id_cannot_collide_with_a_contact(app):
     assert "contact" in app.state.active_banner.lower()
 
 
-# --- contacts ----------------------------------------------------------
-def test_adding_a_device_persists_and_reaches_the_roster(app, tmp_path):
-    open_setting(app, "add")
-    app.state.editor.cells = [0, 0, 0, 4, 2]
-    app.state.editor.cursor = 4
-    play(app, DOUBLE)
+# --- name and channel ---------------------------------------------------
+def test_the_name_is_picked_from_a_list_and_persists(app, tmp_path):
+    open_setting(app, "name")
+    assert app.state.editor.text == "Rover"      # starts on the current name
+    play(app, SINGLE, DOUBLE)                    # the next name, then save
+    chosen = app.settings.identity.callsign
+    assert chosen != "Rover"
+    assert Overrides(tmp_path).get("identity", "callsign") == chosen
+    assert app.state.callsign == chosen
 
-    assert 42 in [c.address for c in app.settings.contacts]
-    assert 42 in [int(c["address"]) for c in Overrides(tmp_path).contacts]
-    assert 42 in [e.address for e in app.roster.entries()]
 
-
-def test_adding_our_own_address_is_refused(app):
-    open_setting(app, "add")
-    app.state.editor.cells = [0, 0, 0, 0, 5]
-    app.state.editor.cursor = 4
-    play(app, DOUBLE)
-    assert 5 not in [c.address for c in app.settings.contacts]
+def test_the_privacy_channel_persists(app, tmp_path):
+    open_setting(app, "channel")
+    assert app.state.editor.text == "channel 1"
+    play(app, SINGLE, SINGLE, DOUBLE)            # 1 -> 3, save
+    assert app.settings.radio.privacy_channel == 3
+    assert app.state.channel == 3
+    assert Overrides(tmp_path).get("radio", "privacy_channel") == 3
 
 
 def test_base_station_starts_on_the_current_value(app):

@@ -13,26 +13,33 @@ import pytest
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
 from app.ui import navigation as nav
-from app.ui.screens import CONTACTS, EDIT, INBOX, PAIR, SETTINGS, STATUS, TALK
+from app.ui.screens import (CONTACTS, EDIT, HOME, INBOX, PAIR, SETTINGS, START,
+                            STATUS, TALK)
 
-# Reachable by gesture alone. Pairing is opened from a Settings row, so it
-# is checked separately.
-MAIN_SCREENS = (CONTACTS, TALK, INBOX, STATUS, SETTINGS)
-ALL_SCREENS = MAIN_SCREENS + (PAIR,)
+ALL_SCREENS = (HOME, START, CONTACTS, TALK, INBOX, STATUS, SETTINGS, PAIR)
 CLICKS = (SINGLE, DOUBLE, TRIPLE)
 
 
 @pytest.mark.parametrize("screen", (TALK, INBOX, STATUS))
 def test_two_clicks_leaves_a_view(screen):
     """Views are places you are already in, so two clicks gets you out."""
-    assert nav.route(screen, DOUBLE) in (nav.BACK_TALK, nav.BACK_CONTACTS)
+    assert nav.route(screen, DOUBLE) == nav.GO_BACK
 
 
 @pytest.mark.parametrize("screen", nav.MENU_SCREENS)
 def test_two_clicks_opens_a_row_in_a_menu(screen):
     """Menus are lists you pick from, so two clicks goes in, not out."""
-    assert nav.route(screen, DOUBLE) in (nav.OPEN_TALK, nav.OPEN_SETTING,
-                                         nav.PAIR_SELECTED)
+    assert nav.route(screen, DOUBLE) in (nav.OPEN_ITEM, nav.OPEN_TALK,
+                                         nav.OPEN_SETTING, nav.PAIR_SELECTED)
+
+
+@pytest.mark.parametrize("screen", [s for s in nav.MENU_SCREENS if s != HOME])
+def test_three_clicks_leaves_a_menu(screen):
+    assert nav.route(screen, TRIPLE) == nav.GO_BACK
+
+
+def test_home_has_nowhere_back_so_three_clicks_shows_status():
+    assert nav.route(HOME, TRIPLE) == nav.OPEN_STATUS
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -63,7 +70,7 @@ def test_no_screen_has_a_gesture_that_does_nothing(screen, gesture):
 def test_empty_inbox_is_not_a_dead_end():
     """The regression: every click must leave a screen with no content."""
     for gesture in CLICKS:
-        assert nav.route(INBOX, gesture, inbox_empty=True) == nav.BACK_TALK
+        assert nav.route(INBOX, gesture, inbox_empty=True) == nav.GO_BACK
 
 
 def test_empty_inbox_still_exits_on_four_clicks():
@@ -93,27 +100,25 @@ def test_every_hint_mentions_talk_and_exit(screen):
     assert "exit" in text, "every screen must say how to leave the app"
 
 
-def test_navigation_reaches_every_screen():
-    """No screen may be strandable: all four stay reachable from any one."""
-    reachable = {CONTACTS}
-    frontier = [CONTACTS]
-    targets = {
-        nav.OPEN_TALK: TALK, nav.OPEN_INBOX: INBOX, nav.OPEN_STATUS: STATUS,
-        nav.BACK_TALK: TALK, nav.BACK_CONTACTS: CONTACTS,
-        nav.OPEN_SETTINGS: SETTINGS,
+def test_every_screen_is_reachable_from_home():
+    """Menus open their rows' screens; the app decides which. Model that."""
+    opens = {
+        (HOME, nav.OPEN_ITEM): (START, INBOX, PAIR, SETTINGS),
+        (START, nav.OPEN_ITEM): (TALK, CONTACTS),
+        (CONTACTS, nav.OPEN_TALK): (TALK,),
+        (TALK, nav.OPEN_INBOX): (INBOX,),
+        (HOME, nav.OPEN_STATUS): (STATUS,),
+        (STATUS, nav.OPEN_SETTINGS): (SETTINGS,),
     }
+    reachable, frontier = {HOME}, [HOME]
     while frontier:
         screen = frontier.pop()
         for gesture in CLICKS:
-            destination = targets.get(nav.route(screen, gesture))
-            if destination and destination not in reachable:
-                reachable.add(destination)
-                frontier.append(destination)
-    assert reachable == set(MAIN_SCREENS)
-
-
-def test_three_clicks_leaves_pairing_for_settings():
-    assert nav.route(PAIR, TRIPLE) == nav.BACK_SETTINGS
+            for destination in opens.get((screen, nav.route(screen, gesture)), ()):
+                if destination not in reachable:
+                    reachable.add(destination)
+                    frontier.append(destination)
+    assert reachable == set(ALL_SCREENS)
 
 
 def test_an_open_editor_owns_every_click_but_exit():

@@ -14,9 +14,9 @@ from app.store.inbox import Item
 from app.store.roster import Entry
 from app.ui import screens, theme
 from app.ui.editors import ChoiceEditor, ClockEditor, ConfirmEditor, DigitEditor
-from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PAIR, PLAYING,
-                            RECEIVING, RECORDING, SENDING, SETTINGS, STATUS,
-                            TALK, ViewState)
+from app.ui.screens import (CONTACTS, EDIT, HOME, IDLE, INBOX, PAIR, PLAYING,
+                            RECEIVING, RECORDING, SENDING, SETTINGS, START,
+                            STATUS, TALK, ViewState)
 
 
 class FakeBoard:
@@ -74,11 +74,23 @@ PAIR_FOUND = [
     (10, "rover", -100, False),
 ]
 
+HOME_ITEMS = [
+    {"key": "start", "label": "Start",
+     "value": "talk to ALL or a paired radio  ·  now: a radio with a long name"},
+    {"key": "receive", "label": "Receive", "value": "2 new  ·  14 in all"},
+    {"key": "pair", "label": "Pair devices", "value": "3 paired  ·  add another radio"},
+    {"key": "settings", "label": "Settings", "value": "name, ID, privacy channel"},
+]
+
+START_ITEMS = [
+    {"key": "all", "label": "To ALL", "value": "every paired radio on channel 16"},
+    {"key": "device", "label": "To a paired device", "value": "3 paired"},
+]
+
 SETTINGS_ITEMS = [
-    {"key": "pair", "label": "Pair device", "value": "find radios nearby and connect"},
     {"key": "device_id", "label": "Device ID", "value": "5  (Rover)"},
     {"key": "base", "label": "Base station", "value": "Base"},
-    {"key": "add", "label": "Add by ID", "value": "type another radio's ID"},
+    {"key": "channel", "label": "Privacy channel", "value": "3  ·  others are ignored"},
     {"key": "clock", "label": "Date & time", "value": "2026-09-04 14:30  ·  system clock"},
     {"key": "reset", "label": "Reset all data", "value": "3 message(s), roster, settings",
      "destructive": True},
@@ -135,8 +147,8 @@ def test_talk_screen_renders_in_every_state(display, radio_state):
     assert screens.render(display, state) is True
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, "talk", INBOX, STATUS, SETTINGS, EDIT,
-                                    PAIR])
+@pytest.mark.parametrize("screen", [HOME, START, CONTACTS, "talk", INBOX, STATUS,
+                                    SETTINGS, EDIT, PAIR])
 def test_screens_render_with_nothing_in_them(display, screen):
     """First boot: no contacts, no messages, no signal, no audio."""
     state = ViewState(screen=screen, audio_ok=False, audio_note="no audio hardware")
@@ -164,7 +176,8 @@ def test_banner_expires(display):
     assert state.active_banner == ""
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, TALK, INBOX, STATUS, SETTINGS, PAIR])
+@pytest.mark.parametrize("screen", [HOME, START, CONTACTS, TALK, INBOX, STATUS,
+                                    SETTINGS, PAIR])
 def test_footer_hints_fit_the_panel(screen):
     """Text that overflows is clipped at both ends and reads as gibberish.
 
@@ -218,12 +231,14 @@ def _bottom_of_drawn_content(image):
     return int(rows[-1]) if rows.size else 0
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, INBOX, STATUS, SETTINGS, PAIR])
+@pytest.mark.parametrize("screen", [HOME, START, CONTACTS, INBOX, STATUS, SETTINGS,
+                                    PAIR])
 def test_content_never_reaches_the_footer(display, screen):
     """The status screen used to print three rows through the hints."""
     from app.ui import screens as scr
 
     state = populated_state(screen=screen, settings_items=SETTINGS_ITEMS,
+                            home_items=HOME_ITEMS, start_items=START_ITEMS,
                             pair_found=PAIR_FOUND, pair_status="looking for radios",
                             battery_present=True, battery_percent=93.9,
                             battery_summary="94%  ~2.3h left",

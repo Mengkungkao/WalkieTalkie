@@ -15,6 +15,13 @@ destination in the packet header (see `protocol`), so this radio's
 address is `self.addr` -- the Device ID, changeable at runtime -- rather
 than whatever number is burned into the module's registers.
 
+**Sealing.** Given a keyring, the link seals everything it sends except
+the few messages that agree keys (`protocol.CLEAR_TYPES`), and drops
+anything it receives that is unsealed, sealed with a key it does not
+hold, altered, replayed, or on another privacy channel -- before any of
+it reaches the app. Without a keyring (tools, older tests) it works in
+the clear, as it always did.
+
 The tx thread also paces fragments. The module buffers only one packet;
 firing a six-fragment voice message at it back-to-back overruns that
 buffer and the tail is silently dropped. So each fragment is followed by
@@ -29,9 +36,10 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
-from app.radio import protocol
+from app.radio import crypto, protocol
 from app.radio.airtime import AirtimeBudget
 from app.radio.framing import Deframer, encode_frame
 from app.radio.sx126x import SX126x
@@ -44,6 +52,14 @@ PACING_GUARD = 0.06
 
 # A peer is "present" if heard from inside this many seconds.
 PRESENCE_TIMEOUT = 15 * 60
+
+# Sealed fragments remembered, so one recorded off the air and sent again
+# is dropped rather than played twice. A few minutes of busy traffic.
+REPLAY_MEMORY = 1024
+
+
+class NotPaired(Exception):
+    """There is no key to seal a message to this station with."""
 
 
 @dataclass
@@ -97,6 +113,11 @@ class Stats:
     self_addressed_drops: int = 0
     overheard: int = 0
     address_clashes: int = 0
+    other_channel: int = 0
+    unsealed_refused: int = 0
+    no_key: int = 0
+    failed_to_open: int = 0
+    replays: int = 0
     last_rssi: int | None = None
     airtime_used: float = 0.0
     queue_depth: int = 0
@@ -108,11 +129,16 @@ class LoraLink:
 
     def __init__(self, radio: SX126x, air_speed: int = 9600,
                  duty_cycle_percent: float = 1.0, callsign: str = "",
-                 addr: int | None = None, token: bytes | None = None):
+                 addr: int | None = None, token: bytes | None = None,
+                 keyring=None, channel: int = protocol.DEFAULT_CHANNEL):
         self.radio = radio
         self.callsign = callsign
         self.addr = (radio.addr if addr is None else addr) & 0xFFFF
         self.token = token or os.urandom(protocol.TOKEN_SIZE)
+        self.keyring = keyring
+        self.channel = channel
+        self._seen = deque(maxlen=REPLAY_MEMORY)
+        self._seen_set = set()
         self.budget = AirtimeBudget(air_speed, duty_cycle_percent)
         self.stats = Stats()
         self.peers: dict = {}
@@ -161,6 +187,10 @@ class LoraLink:
         self.addr = addr & 0xFFFF
         log.info("device id is now %d", self.addr)
 
+    def set_channel(self, channel: int):
+        self.channel = channel
+        log.info("privacy channel is now %d", channel)
+
     # --- lifecycle -----------------------------------------------------
     def start(self):
         if self._running.is_set():
@@ -205,9 +235,13 @@ class LoraLink:
         if packet is None:
             self.stats.frames_dropped += 1
             return
+        if packet.channel != self.channel:
+            # Somebody else's conversation on the same frequency.
+            self.stats.other_channel += 1
+            return
         if packet.src == self.addr:
             if packet.type == protocol.PAIR:
-                token, name = protocol.parse_pair(packet.body)
+                token, _public, name = protocol.parse_pair(packet.body)
                 if token != self.token:
                     self._report_clash(name)
                     return
@@ -233,6 +267,9 @@ class LoraLink:
             self._touch_peer(packet.src, rssi)
             return
 
+        if not self._unseal(packet):
+            return
+
         self.stats.packets_rx += 1
         if rssi is not None:
             self.stats.last_rssi = rssi
@@ -241,6 +278,47 @@ class LoraLink:
         message = self._reassembler.push(packet)
         if message is not None:
             self._deliver(message, peer)
+
+    def _unseal(self, packet) -> bool:
+        """Open a sealed body in place. False if the packet must be dropped."""
+        if packet.sealing == protocol.CLEAR:
+            if self.keyring is not None and packet.type not in protocol.CLEAR_TYPES:
+                # Content in the clear: from a radio that never paired, or
+                # an attempt to talk past the encryption. Either way, unread.
+                self.stats.unsealed_refused += 1
+                return False
+            return True
+        if self.keyring is None:
+            self.stats.no_key += 1
+            return False
+        if packet.sealing == protocol.PAIRWISE:
+            key = self.keyring.pairwise(packet.src)
+        elif packet.sealing == protocol.SENDER:
+            key = self.keyring.peer_broadcast(packet.src)
+        else:
+            key = None
+        if key is None:
+            # A radio we have not paired with, talking to its own contacts.
+            self.stats.no_key += 1
+            return False
+        plain = crypto.open_sealed(key, packet.header, packet.body)
+        if plain is None:
+            self.stats.failed_to_open += 1
+            if self.stats.failed_to_open in (1, 10, 100):
+                log.warning("a packet from %d failed to open: altered, or its "
+                            "keys changed -- pair again if this persists",
+                            packet.src)
+            return False
+        marker = (packet.src, crypto.salt_of(packet.body), packet.seq)
+        if marker in self._seen_set:
+            self.stats.replays += 1
+            return False
+        if len(self._seen) == self._seen.maxlen:
+            self._seen_set.discard(self._seen[0])
+        self._seen.append(marker)
+        self._seen_set.add(marker)
+        packet.body = plain
+        return True
 
     def _report_clash(self, name: str):
         self.stats.address_clashes += 1
@@ -260,7 +338,7 @@ class LoraLink:
             if name:
                 peer.name = name
         elif message.type == protocol.PAIR:
-            _token, name = protocol.parse_pair(message.body)
+            _token, _public, name = protocol.parse_pair(message.body)
             if name:
                 peer.name = name
 
@@ -355,39 +433,81 @@ class LoraLink:
         self._tx.put((dst, packets, label, report))
         self.stats.queue_depth = self._tx.qsize()
 
-    def send_text(self, dst: int, text: str) -> int:
+    def _sealing(self, type_: int, dst: int):
+        """(sealing, key) for a message; raises NotPaired if there is no key."""
+        if self.keyring is None or type_ in protocol.CLEAR_TYPES:
+            return protocol.CLEAR, None
+        if dst == protocol.BROADCAST:
+            return protocol.SENDER, self.keyring.broadcast_key
+        key = self.keyring.pairwise(dst)
+        if key is None:
+            raise NotPaired(dst)
+        return protocol.PAIRWISE, key
+
+    def can_send(self, dst: int, type_: int = protocol.TEXT) -> bool:
+        try:
+            self._sealing(type_, dst)
+        except NotPaired:
+            return False
+        return True
+
+    def plan(self, dst: int, size: int) -> tuple:
+        """(fragments, bytes on the air) for a `size`-byte message to `dst`."""
+        sealing, _key = self._sealing(protocol.VOICE, dst)
+        overhead = crypto.OVERHEAD if sealing != protocol.CLEAR else 0
+        per_fragment = protocol.MAX_BODY - overhead
+        fragments = max(1, -(-size // per_fragment))
+        framing = len(encode_frame(b"")) + protocol.HEADER_SIZE + overhead
+        return fragments, size + fragments * framing
+
+    def _fragments(self, type_: int, dst: int, body: bytes, flags: int = 0):
+        sealing, key = self._sealing(type_, dst)
         msg_id = next(self._msg_ids)
+        packets = protocol.fragment(
+            type_, self.addr, msg_id, body, flags=flags, dst=dst,
+            channel=self.channel, sealing=sealing,
+            seal=(lambda header, chunk: crypto.seal(key, header, chunk)) if key else None,
+            overhead=crypto.OVERHEAD if key else 0,
+        )
+        return msg_id, packets
+
+    def send_text(self, dst: int, text: str) -> int:
         body = text.encode("utf-8")[: protocol.MAX_BODY * 255]
-        packets = protocol.fragment(protocol.TEXT, self.addr, msg_id, body, dst=dst)
+        msg_id, packets = self._fragments(protocol.TEXT, dst, body)
         self._enqueue(dst, packets, f"text/{msg_id}")
         return msg_id
 
     def send_voice(self, dst: int, encoded: bytes, codec_mode: int) -> int:
-        msg_id = next(self._msg_ids)
-        packets = protocol.fragment(
-            protocol.VOICE, self.addr, msg_id, encoded, flags=codec_mode, dst=dst
-        )
+        msg_id, packets = self._fragments(protocol.VOICE, dst, encoded, flags=codec_mode)
         self._enqueue(dst, packets, f"voice/{msg_id}")
         return msg_id
 
     def _send_named(self, type_: int, dst: int, label: str) -> int:
-        msg_id = next(self._msg_ids)
-        packets = protocol.fragment(
-            type_, self.addr, msg_id,
-            self.callsign.encode("utf-8")[: protocol.MAX_BODY], dst=dst,
-        )
+        name = self.callsign.encode("utf-8")[: protocol.MAX_BODY - crypto.OVERHEAD]
+        msg_id, packets = self._fragments(type_, dst, name)
         self._enqueue(dst, packets, label, report=False)
         return msg_id
 
     def send_pair(self) -> int:
         """Announce that this radio is pairing, to anyone else who is."""
-        msg_id = next(self._msg_ids)
-        packets = protocol.fragment(
-            protocol.PAIR, self.addr, msg_id,
-            protocol.pair_body(self.token, self.callsign),
-        )
+        public = self.keyring.public if self.keyring is not None else b""
+        msg_id, packets = self._fragments(
+            protocol.PAIR, protocol.BROADCAST,
+            protocol.pair_body(self.token, public, self.callsign))
         self._enqueue(protocol.BROADCAST, packets, "pair", report=False)
         return msg_id
+
+    def send_pairing(self, type_: int, dst: int, body: bytes) -> int:
+        """A pairing request or answer; its body is sealed by the keyring."""
+        msg_id, packets = self._fragments(type_, dst, body)
+        self._enqueue(dst, packets, protocol.TYPE_NAMES[type_], report=False)
+        return msg_id
+
+    def mark_linked(self, addr: int):
+        """Pairing completed both ways: as good as an answered hello."""
+        peer = self._touch_peer(addr, None)
+        peer.linked_at = time.time()
+        peer.rejected = False
 
     def send_hello(self, dst: int = protocol.BROADCAST) -> int:
         """Call a station. It is linked once it answers."""

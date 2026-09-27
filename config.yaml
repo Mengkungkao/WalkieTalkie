@@ -10,6 +10,10 @@ radio:
   # unused one on first start and keeps it in ~/.whisplay-walkie. Change
   # it on the device under Settings > Device ID; it takes effect at once.
   address: auto
+  # Privacy channel, 1-16. Radios on different channels share the
+  # frequency but ignore each other completely. Change it on the device
+  # under Settings > Privacy channel.
+  privacy_channel: 1
   frequency_mhz: 868
   # Air rate, not UART rate. Higher is faster but shorter-ranged; 9600
   # keeps a ~1 km line-of-sight link while sending a 10 s voice message
@@ -69,7 +73,7 @@ power:
   tick_seconds: 5
 
 # Contacts. Normally left empty: pair radios on the device instead, under
-# Settings > Pair device, which saves them per device. Entries here are
-# shown on every radio that uses this file, whether or not the other
-# radio is switched on.
+# Home > Pair devices, which saves them with their keys. Entries here are
+# shown on every radio that uses this file, but cannot be talked to
+# until paired: pairing is what sets up the keys.
 contacts: []

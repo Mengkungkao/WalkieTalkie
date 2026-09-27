@@ -123,18 +123,47 @@ def test_a_pair_beacon_carries_the_name(trio):
     message, peer = inbox.wait()[0]
     assert message.type == protocol.PAIR
     assert peer.name == "Alice"
-    assert protocol.parse_pair(message.body) == (alice.token, "Alice")
+    token, _public, name = protocol.parse_pair(message.body)
+    assert (token, name) == (alice.token, "Alice")
 
 
-def test_a_radio_not_yet_updated_is_still_heard(trio):
-    """Version 1 had no destination; its module filtered for it."""
+def test_a_radio_on_an_older_version_is_ignored(trio):
+    """Its packets have no channel or sealing; guessing would be worse."""
     _alice, bob, _carol = trio
     inbox = Collector()
     bob.on_message(inbox)
-    old = protocol.V1_HEADER.pack((1 << 4) | protocol.TEXT, 7, 0, 0, 1, 0) + b"v1"
+    import struct
+    old = struct.pack(">BHHBBBB", (2 << 4) | protocol.TEXT, 7, 2, 0, 0, 1, 0) + b"v2"
     bob.radio.ser.inject(encode_frame(old))
-    message, _peer = inbox.wait()[0]
-    assert (message.src, message.body, message.dst) == (7, b"v1", None)
+    time.sleep(0.3)
+    assert inbox.messages == []
+
+
+# --- privacy channels --------------------------------------------------------
+def test_another_channel_is_not_heard_at_all(trio):
+    alice, bob, carol = trio
+    bob_inbox, carol_inbox = Collector(), Collector()
+    bob.on_message(bob_inbox)
+    carol.on_message(carol_inbox)
+    carol.set_channel(5)
+
+    alice.send_text(protocol.BROADCAST, "channel one")
+    assert bob_inbox.wait()[0][0].body == b"channel one"
+    time.sleep(0.3)
+    assert carol_inbox.messages == []
+    assert carol.stats.other_channel == 1
+    assert 1 not in carol.peers           # not even noted as present
+
+
+def test_radios_on_the_same_other_channel_hear_each_other(trio):
+    alice, bob, carol = trio
+    inbox = Collector()
+    carol.on_message(inbox)
+    alice.set_channel(9)
+    carol.set_channel(9)
+    alice.send_text(3, "on nine")
+    assert inbox.wait()[0][0].body == b"on nine"
+    assert bob.stats.other_channel == 1
 
 
 def test_handshakes_and_beacons_do_not_drive_the_progress_bar(trio):

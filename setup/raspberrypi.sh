@@ -30,7 +30,8 @@ BOOT_CMDLINE=/boot/firmware/cmdline.txt
 
 # ------------------------------------------------------------ 2. packages
 step "System packages"
-install_packages python3-serial python3-yaml python3-pil python3-numpy alsa-utils
+install_packages python3-serial python3-yaml python3-pil python3-numpy \
+                 python3-cryptography alsa-utils
 
 # ---------------------------------------------------------------- 3. UART
 step "Serial port for the LoRa HAT"

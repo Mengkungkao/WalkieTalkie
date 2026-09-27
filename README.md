@@ -153,7 +153,7 @@ pair with it from the app — see [Pairing](#pairing).
 ```bash
 sudo apt update
 sudo apt install -y python3-serial python3-yaml python3-pil python3-numpy \
-                    libcodec2-1.2 alsa-utils python3-pytest
+                    python3-cryptography libcodec2-1.2 alsa-utils python3-pytest
 ```
 
 `libcodec2` is a **system shared library**, loaded with `ctypes` — there
@@ -273,7 +273,7 @@ radio:
   address: auto          # an unused Device ID, picked on first start and kept
   frequency_mhz: 868
   duty_cycle_percent: 1.0  # ETSI EU868. Raise only where licensed.
-contacts: []             # pair on the device: Settings > Pair device
+contacts: []             # pair on the device: Home > Pair devices
 ```
 
 Set `callsign` to name a radio something other than its hostname.
@@ -353,25 +353,43 @@ ssh orangepi@192.168.0.130 'cd WalkieTalkie && ./setup.sh --check'   # after it
 
 ## Using it
 
+The app opens on a menu:
+
+```
+WALKIE                         orangepizero2w · ID 6235 · ch 3
+  Start           ──▶  To ALL               ──▶  Talk to every paired radio
+                       To a paired device   ──▶  pick one  ──▶  Talk
+  Receive         ──▶  what has come in, newest first
+  Pair devices    ──▶  find another radio and pair with it
+  Settings        ──▶  name, Device ID, privacy channel, …
+```
+
 | Screen | 1 click | 2 clicks | 3 clicks | hold |
 |---|---|---|---|---|
-| **Contacts** | next station | open Talk | Status | talk to selection |
-| **Talk** | Inbox | back to Contacts | replay last voice | **talk** |
-| **Inbox** | next message | back to Talk | play it | talk |
-| **Status** | Contacts | Contacts | Settings | talk |
-| **Settings** | next setting | open it | back to Contacts | talk |
-| **Pair** | next radio found | pair with it | back to Settings | talk |
+| **Home** | next row | open it | Status | talk |
+| **Start** | next row | open it | back | talk |
+| **Paired** | next radio | talk to it | back | talk |
+| **Talk** | Receive | back | replay last voice | **talk** |
+| **Receive** | next message | back | play it | talk |
+| **Status** | back | back | Settings | talk |
+| **Settings** | next setting | open it | back | talk |
+| **Pair** | next radio found | pair with it | back | talk |
 | *editor* | change value | next field / save | cancel | — |
 
-Four clicks exits from anywhere. Hold-to-talk works on every screen —
-you should never have to navigate somewhere before you can answer.
+Four clicks exits from anywhere. Hold-to-talk works on every screen and
+talks to whoever you last chose under Start — ALL until you pick someone
+— so you never have to navigate somewhere before you can answer. Home
+shows who that is (`now talking to jarvis`).
 
-There are two kinds of screen. **Menus** — Contacts, Settings and Pair — are
-lists you pick from, so two clicks opens the highlighted row and three
-goes back. **Views** — Talk, Inbox and Status — are places you already
-are, so two clicks leaves. Three clicks means play wherever there is
-something to play. An empty inbox leaves on any click rather than
-sitting there ignoring you.
+There are two kinds of screen. **Menus** — Home, Start, Paired, Settings
+and Pair — are lists you pick from, so two clicks opens the highlighted
+row and three goes back. **Views** — Talk, Receive and Status — are
+places you already are, so two clicks leaves. "Back" returns to wherever
+you came from: Receive opened from Talk goes back to Talk, opened from
+Home goes back Home. Three clicks means play wherever there is something
+to play. An empty Receive screen leaves on any click rather than sitting
+there ignoring you.
+
 Both the dispatcher and the on-screen hints come from one table in
 [app/ui/navigation.py](app/ui/navigation.py), so a screen cannot
 advertise a gesture the app does not implement — which is exactly how
@@ -408,47 +426,18 @@ the feature quietly stop working.
 
 ## Connecting two radios
 
-Hearing a station does not prove it hears you, and a one-way link is the
-classic radio failure — you talk for a minute before discovering nobody
-received a word. So a station counts as connected only once it has
-**answered**.
-
-```
-MengPi  ──hello──▶  jarvis      jarvis knows MengPi is on the air
-MengPi  ◀─hello-ack─  jarvis    both ends now know the link carries
-```
-
-It happens on its own. At startup each node calls every station in its
-contact list, and opening **Talk** on a station that is not connected
-calls it again. A station already in your contacts answers immediately —
-you paired it deliberately, and confirming it every boot would be noise.
-
-An **unknown** station is different: its call is held and the operator is
-asked, because accepting is what adds it to the contact list.
-
-```
-        hilltop is calling
-        address 77
-        accept and add as a contact?
-                 no          ← starts on "no"; 1 click to change
-```
-
-Refusing sends a rejection rather than ignoring it, so the caller learns
-where it stands instead of retrying into silence.
-
-The contacts screen shows the state as a dot: **filled green** answered,
-**hollow amber** calling, **red** refused, **amber** heard but not
-handshaked, **grey** never heard. Talk says `not connected` under the
-disc before you transmit, and Status has a `link` row.
+Two radios talk once they have **paired**. Pairing exchanges keys, so
+everything after it is encrypted — see [Privacy and
+security](#privacy-and-security). There is no other way to add a radio:
+typing in an ID cannot set up keys.
 
 ### Pairing
 
-Pairing is how two radios find each other without anyone typing an ID.
-On **both** radios: **Status → 3 clicks → Settings → Pair device**.
+On **both** radios: **Home → Pair devices**.
 
 ```
-this radio: orangepizero2w · ID 40213
-        looking for radios
+this radio: orangepizero2w · ID 6235
+    code 4821 · waiting for jarvis
 
  ┌──────────────────────────────┐
  │ jarvis                       │   ← 1 click next, 2 clicks pair
@@ -457,45 +446,106 @@ this radio: orangepizero2w · ID 40213
 ```
 
 1. Each radio announces itself every 3 seconds while the screen is open,
-   and lists the other radios it hears doing the same.
-2. On one radio, highlight the other and **2 clicks** to pair. It shows
-   `waiting for jarvis to accept`.
-3. The other radio asks its operator: *orangepizero2w wants to pair —
-   accept and add as a contact?* It starts on **no**, so click onto
-   **YES**, then 2 clicks.
-4. Both radios save each other as contacts and are connected. The one
-   that asked jumps to Contacts with the new station selected.
+   and lists the other radios it hears doing the same. Both must be on
+   the same privacy channel.
+2. On one radio, highlight the other and **2 clicks** to pair. It shows a
+   four-digit **code** and waits.
+3. The other radio asks: *orangepizero2w wants to pair — code 4821*.
+   **Check the code is the same on both screens.** Then click onto
+   **YES** (it starts on **no**) and 2 clicks.
+4. Both radios save each other, with keys, and are connected. Each lands
+   on the Paired list with the new radio selected.
+
+The code is what makes pairing safe over the air. It is computed from
+both radios' keys, so anyone who slipped their own key into the exchange
+would make the two screens show different codes. If they differ, say no.
 
 A refusal says so (`jarvis said no`), and nothing is saved on either
-side: the radio that asked only adds the contact once the answer is yes.
-The pairing window closes by itself after two minutes, and leaving the
-screen — 3 clicks, or holding to talk — stops it. A beacon is about 20
-bytes, so two minutes of pairing costs a few seconds of the hour's
-duty-cycle budget. Radios that are not pairing ignore the beacons, so a
-stranger pairing nearby never shows up on your contacts screen.
+side: the radio that asked saves the other only once the answer arrives,
+and only if the answer carries the same key its beacon did. The window
+closes by itself after two minutes, and leaving the screen — 3 clicks,
+or holding to talk — stops it. A radio that is not pairing ignores
+beacons and requests, so a stranger nearby can neither show up on your
+lists nor make your radio ask you anything. Two minutes of pairing costs
+a few seconds of the hour's duty-cycle budget.
 
-**Two radios with the same ID.** Every radio used to ship as address 5,
-and two radios on one address cannot talk — each discards the other's
-packets as its own echo. Fresh installs now pick a random ID, so this is
-rare, and pairing catches it when it happens: each beacon carries a
+**Two radios with the same ID.** Fresh installs pick a random ID, so this
+is rare, and pairing catches it when it happens: each beacon carries a
 random token the radio chose at install time. A radio that hears its own
 ID with someone else's token knows it has a twin. If it is the one
 pairing, it picks a new ID and says so (`ID 5 was taken: now 40213`); if
 not, it answers once so the pairing radio learns of the clash and moves.
 
+### Staying connected
+
+Hearing a station does not prove it hears you, and a one-way link is the
+classic radio failure — you talk for a minute before discovering nobody
+received a word. So a station counts as connected only once it has
+**answered**:
+
+```
+MengPi  ──hello──▶  jarvis      jarvis knows MengPi is on the air
+MengPi  ◀─hello-ack─  jarvis    both ends now know the link carries
+```
+
+It happens on its own. At startup each radio calls every radio it has
+paired with, and opening **Talk** on one that is not connected calls it
+again. The hello is sealed with the pair's key, so it also proves the
+other radio still holds it, and it carries the other radio's current
+name, which updates the Paired list.
+
+The Paired list shows the state as a dot: **filled green** answered,
+**hollow amber** calling, **red** refused, **amber** heard but not
+handshaked, **grey** never heard. A contact from before pairing existed
+says `not paired: pair again`. Talk says `not connected` under the disc
+before you transmit, and Status has a `peer` row.
+
+## Privacy and security
+
+**Privacy channels.** Settings → Privacy channel picks one of 16. Radios
+on different channels share the frequency but ignore each other
+completely — like the privacy codes on a handheld walkie-talkie. It is a
+filter, not secrecy: that is what encryption is for.
+
+**Encryption.** Every radio makes its own key pair on first start. When
+two radios pair they agree a key only the two of them hold, and each
+hands the other its *broadcast key*, sealed so nobody listening can read
+it. Then:
+
+| You talk to | Sealed with | Who can listen |
+|---|---|---|
+| one paired radio | the pair's own key | that radio |
+| ALL | your broadcast key | every radio you have paired with |
+
+So **ALL means everyone you have paired with**, not everyone on the air.
+Anything unsealed, sealed with a key this radio does not hold, altered in
+flight, or recorded and played back is dropped before the app sees it.
+Only the pairing messages themselves travel in the clear, and even those
+carry the broadcast key sealed.
+
+What it does not hide: that radios are transmitting, their Device IDs,
+names and channel (the header is in the clear so receivers can route on
+it, though it is authenticated), and message sizes and timing.
+
+**Keys** live in `~/.whisplay-walkie/keys.json`, readable only by the
+owner, and never leave the device — `deploy.sh` does not touch that
+directory. **Reset all data** makes new keys, so every radio has to be
+paired again. The cost of all this is 22 bytes per packet, about an
+eighth of each one.
+
 ## Settings
 
-Everything that identifies a node can be set on the device, with the
-button — no editing files over SSH. **Status → 3 clicks → Settings.**
+Everything that identifies a radio can be set on the device, with the
+button — no editing files over SSH. **Home → Settings.**
 
 | Setting | What it does |
 |---|---|
-| **Pair device** | find radios nearby and connect — see [Pairing](#pairing) |
+| **Name** | what other radios see: the hostname, or Alpha … Zulu |
 | **Device ID** | this radio's ID, 0–65534; takes effect at once |
-| **Base station** | which contact counts as base |
-| **Add by ID** | add a radio as a contact by typing its ID |
+| **Privacy channel** | 1–16; only radios on the same channel hear you |
+| **Base station** | which paired radio counts as base |
 | **Date & time** | fixes timestamps on a Pi with no RTC |
-| **Reset all data** | erases messages, voice clips, roster and settings |
+| **Reset all data** | erases messages, voice clips, paired radios, keys and settings |
 
 Editors are driven by the same click language: **1 click** changes the
 value under the cursor, **2 clicks** moves to the next field and saves
@@ -509,9 +559,9 @@ confirming, so no reflex gesture can wipe the inbox.
 
 Changes are saved to `~/.whisplay-walkie/settings.json`, not back into
 `config.yaml` — rewriting that would destroy the comments that explain
-it, and it is version controlled and shared between nodes while a
-device's address must be unique to it. Precedence is defaults <
-`config.yaml` < device settings < environment, so a one-off
+it, and it is version controlled and shared between radios while a
+radio's ID must be unique to it. Precedence is defaults < `config.yaml`
+< device settings < environment, so a one-off
 `WALKIE_RADIO_ADDRESS=9 ./run.sh` still wins for debugging.
 
 **Device ID takes effect immediately.** It used to need the module
@@ -525,13 +575,14 @@ old ID still have it saved, so pair with them again; the app reminds you
 
 **Every radio needs a unique ID.** Two radios sharing one cannot talk:
 each discards the other's traffic as its own echo. Fresh installs pick a
-random one, pairing detects and fixes clashes, the app refuses a contact
-that shares this radio's ID, and `deploy.sh` never copies `config.yaml`
-between devices.
+random one, pairing detects and fixes clashes, and `deploy.sh` never
+copies `config.yaml` between devices.
 
-**Upgrading from an older version.** The packet header changed (protocol
-v2), so update every radio. An updated radio still hears an old one, but
-an old radio cannot hear an updated one.
+**Upgrading from an older version.** The packet format changed (protocol
+v3: privacy channels and encryption), so update every radio, then pair
+them. Radios on different versions cannot hear each other at all, and
+contacts saved before this version have no keys: they show `not paired`
+until paired again.
 
 ## The backlight is also the radio's M0
 
@@ -639,15 +690,19 @@ backlight deadline arrives. How:
 
 ```
 [ FF FF chan ]   consumed by the module: always a module broadcast
-[ AA 55 | len | header(9) | body | crc16 ]   ← what goes on the air
-         header: ver+type | src(2) | dst(2) | msg_id | seq | total | flags
+[ AA 55 | len | header(10) | body | crc16 ]   ← what goes on the air
+         header: ver+type | channel+sealing | src(2) | dst(2) | msg_id | seq | total | flags
+         body:   salt(6) | ciphertext | tag(16)      ← sealed, ChaCha20-Poly1305
 ```
 
-Every radio on the channel hears every packet and keeps those whose
-`dst` is its own Device ID or broadcast. That moved addressing out of the
-module's registers and into the app, which is what lets Device ID and
-pairing work without reprovisioning. It is not a privacy change: any
-module on the channel could always listen to everything.
+Every radio on the frequency hears every packet. It drops those on
+another privacy channel, keeps those whose `dst` is its own Device ID or
+broadcast, and opens the body with the key the sealing field names — the
+pair's key or the sender's broadcast key — using the header as
+associated data, so no field of it can be changed without the packet
+failing to open. Each fragment is sealed on its own, so a lost fragment
+never makes the rest of a voice message unreadable. See
+[app/radio/crypto.py](app/radio/crypto.py).
 
 The module strips the first three bytes before transmitting and appends
 one RSSI byte to everything it receives. Framing is length-prefixed
@@ -739,7 +794,9 @@ a duty-cycle exhaustion — entirely in software.
 | `cannot drive M0/M1 on this board` | Provisioning from an Orange Pi | Provision the HAT on a Pi |
 | `radio offline` on screen | Port busy or HAT unseated | `fuser -v /dev/ttyS0` |
 | Nothing received | Frequency or air-rate mismatch | `provision_radio.py --check` on both |
-| An old radio stopped hearing an updated one | Protocol v2 | Update every radio |
+| Two radios cannot hear each other at all | Different privacy channels, or versions | Same channel in Settings; update both |
+| `pair with X first` | A contact from before encryption | Pair again: Home → Pair devices |
+| Pairing lists nobody | The other radio is not on its Pair screen, or on another channel | Open Pair devices on both, same channel |
 | A paired radio stopped answering after an ID change | It still has the old ID | Pair again |
 | `no microphone` / `no audio hardware` | Sound card not registered | See below |
 | Screen black after exiting the app | Fixed — see below | Update; the app now hands the backlight back lit |

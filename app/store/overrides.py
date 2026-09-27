@@ -33,7 +33,7 @@ FILE_NAME = "settings.json"
 # cycle, codec mode) changes how the radio behaves on air and belongs in
 # config.yaml where it can be commented and reviewed.
 ALLOWED = {
-    "radio": {"address"},
+    "radio": {"address", "privacy_channel"},
     "identity": {"callsign"},
 }
 
@@ -92,6 +92,16 @@ class Overrides:
         )
         self.save()
         return True
+
+    def rename_contact(self, address: int, name: str) -> bool:
+        for contact in self.contacts:
+            if int(contact.get("address", -1)) == address:
+                if contact.get("name") == name:
+                    return False
+                contact["name"] = name
+                self.save()
+                return True
+        return False
 
     def remove_contact(self, address: int) -> bool:
         before = self.contacts
@@ -187,6 +197,9 @@ def apply(settings, overrides: "Overrides"):
     elif settings.radio.address is None:
         settings.radio.address = overrides.assign_address(
             c.address for c in settings.contacts)
+    channel = overrides.get("radio", "privacy_channel")
+    if channel is not None:
+        settings.radio.privacy_channel = int(channel)
     callsign = overrides.get("identity", "callsign")
     if callsign:
         settings.identity.callsign = str(callsign)

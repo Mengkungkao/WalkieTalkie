@@ -23,7 +23,7 @@ echo "==> preflight"
 python3 - <<'CHECK'
 import ctypes.util, shutil, sys
 ok = True
-for module in ("serial", "yaml", "PIL", "numpy"):
+for module in ("serial", "yaml", "PIL", "numpy", "cryptography"):
     try:
         __import__(module)
         print(f"    {module:<8} ok")

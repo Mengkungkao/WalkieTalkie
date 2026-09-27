@@ -34,7 +34,8 @@ BOOT_ENV=/boot/orangepiEnv.txt
 
 # ------------------------------------------------------------ 2. packages
 step "System packages"
-install_packages python3-serial python3-yaml python3-pil python3-numpy alsa-utils gpiod
+install_packages python3-serial python3-yaml python3-pil python3-numpy \
+                 python3-cryptography alsa-utils gpiod
 
 # ---------------------------------------------------------------- 3. UART
 step "Serial port for the LoRa HAT"
@@ -146,7 +147,7 @@ info "itself, so provision this LoRa HAT once on a Raspberry Pi running"
 info "this project (setup/raspberrypi.sh, step 7), then fit it back here:"
 info "    python3 provision_radio.py --frequency ${FREQUENCY:-868}"
 info "Every module gets the same settings: the Device ID and pairing are"
-info "handled in the app (Settings > Pair device), not in the module."
+info "handled in the app (Home > Pair devices), not in the module."
 
 # ----------------------------------------------------------------- 8. test
 step "Self-test"

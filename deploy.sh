@@ -52,12 +52,12 @@ cd "${REMOTE_DIR}"
 chmod +x run.sh install.sh setup.sh setup/*.sh provision_radio.py 2>/dev/null || true
 
 missing=""
-for pkg in serial yaml PIL numpy; do
+for pkg in serial yaml PIL numpy cryptography; do
     python3 -c "import \$pkg" 2>/dev/null || missing="\$missing \$pkg"
 done
 if [ -n "\$missing" ]; then
     echo "   missing python modules:\$missing"
-    echo "   install with: sudo apt install python3-serial python3-yaml python3-pil python3-numpy"
+    echo "   install with: sudo apt install python3-serial python3-yaml python3-pil python3-numpy python3-cryptography"
 fi
 
 python3 - <<'CHECK'
