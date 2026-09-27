@@ -21,6 +21,7 @@ TALK = "talk"
 INBOX = "inbox"
 STATUS = "status"
 SETTINGS = "settings"
+PAIR = "pair"
 # An editor is modal: it owns every gesture while it is open, so it is a
 # screen rather than an overlay on one.
 EDIT = "edit"
@@ -99,6 +100,11 @@ class ViewState:
     editor: object = None
     editor_title: str = ""
     editor_hint: str = ""
+
+    # Radios heard pairing: (address, name, rssi, already a contact).
+    pair_found: list = field(default_factory=list)
+    pair_index: int = 0
+    pair_status: str = ""
 
     link_states: dict = field(default_factory=dict)
     target_linked: bool = False
@@ -564,6 +570,62 @@ def draw_settings(draw, state: ViewState):
     draw_footer(draw, state, _hints(SETTINGS))
 
 
+# --- pairing -----------------------------------------------------------
+def draw_pair(draw, state: ViewState):
+    """Radios heard pairing, and who this one is."""
+    draw_header(draw, state, "PAIR")
+    width = theme.SCREEN_WIDTH - 2 * MARGIN
+    small, status_font = theme.font(11), theme.font(12, "bold")
+    me = f"this radio: {state.callsign or '?'} · ID {state.address}"
+    centred(draw, CONTENT_TOP, ellipsise(draw, me, small, width), small,
+            theme.TEXT_DIM)
+    status = state.pair_status or "looking for radios"
+    centred(draw, CONTENT_TOP + 16, ellipsise(draw, status, status_font, width),
+            status_font, theme.ACCENT)
+
+    list_top = CONTENT_TOP + 38
+    if not state.pair_found:
+        for index, line in enumerate(("On the other radio, open",
+                                      "Settings > Pair device too.")):
+            centred(draw, list_top + 34 + index * 18, line, theme.font(12),
+                    theme.TEXT_FAINT)
+        draw_footer(draw, state, _hints(PAIR))
+        return
+
+    row_height = SETTING_ROW
+    count = len(state.pair_found)
+    selected = state.pair_index % count
+    visible = max(1, min(count, (CONTENT_BOTTOM - list_top - 14) // row_height))
+    first = max(0, min(selected - visible // 2, count - visible))
+
+    text_width = theme.SCREEN_WIDTH - 16 - MARGIN - 8
+    for offset, (addr, name, rssi, known) in enumerate(
+            state.pair_found[first:first + visible]):
+        top = list_top + offset * row_height
+        chosen = first + offset == selected
+        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + SETTING_PANEL],
+              fill=theme.SURFACE_HI if chosen else theme.SURFACE,
+              outline=theme.ACCENT if chosen else None)
+        name_font = theme.font(14, "bold" if chosen else "regular")
+        draw.text((16, top + SETTING_NAME_Y),
+                  ellipsise(draw, name, name_font, text_width), font=name_font,
+                  fill=theme.TEXT if chosen else theme.TEXT_DIM)
+        detail = [f"ID {addr}"]
+        if rssi is not None:
+            detail.append(theme.SIGNAL_LABELS[theme.signal_level(rssi)])
+        if known:
+            detail.append("already a contact")
+        draw.text((16, top + SETTING_DETAIL_Y),
+                  ellipsise(draw, "  ·  ".join(detail), small, text_width),
+                  font=small, fill=theme.TEXT_FAINT)
+
+    if count > visible:
+        centred(draw, list_top + visible * row_height, f"{selected + 1} / {count}",
+                small, theme.TEXT_FAINT)
+
+    draw_footer(draw, state, _hints(PAIR))
+
+
 def draw_editor(draw, state: ViewState):
     """A modal value editor: one big value, and what the clicks do to it."""
     editor = state.editor
@@ -622,6 +684,7 @@ def draw_editor(draw, state: ViewState):
 RENDERERS = {
     CONTACTS: draw_contacts, TALK: draw_talk, INBOX: draw_inbox,
     STATUS: draw_status, SETTINGS: draw_settings, EDIT: draw_editor,
+    PAIR: draw_pair,
 }
 
 

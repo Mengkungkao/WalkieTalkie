@@ -14,9 +14,9 @@ from app.store.inbox import Item
 from app.store.roster import Entry
 from app.ui import screens, theme
 from app.ui.editors import ChoiceEditor, ClockEditor, ConfirmEditor, DigitEditor
-from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PLAYING, RECEIVING,
-                            RECORDING, SENDING, SETTINGS, STATUS, TALK,
-                            ViewState)
+from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PAIR, PLAYING,
+                            RECEIVING, RECORDING, SENDING, SETTINGS, STATUS,
+                            TALK, ViewState)
 
 
 class FakeBoard:
@@ -66,10 +66,19 @@ def populated_state(**overrides) -> ViewState:
     return state
 
 
+PAIR_FOUND = [
+    (1234, "jarvis", -72, False),
+    (77, "a radio whose owner gave it a very long name", -118, True),
+    (8, "hilltop", None, False),
+    (9, "base", -90, False),
+    (10, "rover", -100, False),
+]
+
 SETTINGS_ITEMS = [
+    {"key": "pair", "label": "Pair device", "value": "find radios nearby and connect"},
     {"key": "device_id", "label": "Device ID", "value": "5  (Rover)"},
     {"key": "base", "label": "Base station", "value": "Base"},
-    {"key": "add", "label": "Add device", "value": "pair another radio by address"},
+    {"key": "add", "label": "Add by ID", "value": "type another radio's ID"},
     {"key": "clock", "label": "Date & time", "value": "2026-09-04 14:30  ·  system clock"},
     {"key": "reset", "label": "Reset all data", "value": "3 message(s), roster, settings",
      "destructive": True},
@@ -126,7 +135,8 @@ def test_talk_screen_renders_in_every_state(display, radio_state):
     assert screens.render(display, state) is True
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, "talk", INBOX, STATUS, SETTINGS, EDIT])
+@pytest.mark.parametrize("screen", [CONTACTS, "talk", INBOX, STATUS, SETTINGS, EDIT,
+                                    PAIR])
 def test_screens_render_with_nothing_in_them(display, screen):
     """First boot: no contacts, no messages, no signal, no audio."""
     state = ViewState(screen=screen, audio_ok=False, audio_note="no audio hardware")
@@ -154,7 +164,7 @@ def test_banner_expires(display):
     assert state.active_banner == ""
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, TALK, INBOX, STATUS, SETTINGS])
+@pytest.mark.parametrize("screen", [CONTACTS, TALK, INBOX, STATUS, SETTINGS, PAIR])
 def test_footer_hints_fit_the_panel(screen):
     """Text that overflows is clipped at both ends and reads as gibberish.
 
@@ -208,12 +218,13 @@ def _bottom_of_drawn_content(image):
     return int(rows[-1]) if rows.size else 0
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, INBOX, STATUS, SETTINGS])
+@pytest.mark.parametrize("screen", [CONTACTS, INBOX, STATUS, SETTINGS, PAIR])
 def test_content_never_reaches_the_footer(display, screen):
     """The status screen used to print three rows through the hints."""
     from app.ui import screens as scr
 
     state = populated_state(screen=screen, settings_items=SETTINGS_ITEMS,
+                            pair_found=PAIR_FOUND, pair_status="looking for radios",
                             battery_present=True, battery_percent=93.9,
                             battery_summary="94%  ~2.3h left",
                             radio_note="transparent mode",
@@ -351,3 +362,12 @@ def test_row_text_does_not_cross_the_panel_border(display, screen):
         assert (band == np.array(theme.BG, dtype=arr.dtype)).all(), (
             f"{screen}: something is drawn between rows {index} and "
             f"{index + 1} (y {gap_top}-{gap_bottom})")
+
+
+# --- pairing -------------------------------------------------------------
+@pytest.mark.parametrize("index", range(len(PAIR_FOUND)))
+def test_pair_screen_renders_with_each_radio_selected(display, index):
+    state = populated_state(screen=PAIR, pair_found=PAIR_FOUND, pair_index=index,
+                            pair_status="waiting for a radio with a long name to accept")
+    screens.render(display, state)
+

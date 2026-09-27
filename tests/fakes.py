@@ -46,6 +46,15 @@ class FakeModule:
         right.peers.append(left)
         return left, right
 
+    @staticmethod
+    def network(count: int, rssi_byte: int | None = DEFAULT_RSSI_BYTE):
+        """`count` modules that all hear each other, addressed 1..count."""
+        modules = [FakeModule(f"node{i}", addr=i, rssi_byte=rssi_byte)
+                   for i in range(1, count + 1)]
+        for module in modules:
+            module.peers.extend(m for m in modules if m is not module)
+        return modules
+
     # --- pyserial surface ---------------------------------------------
     @property
     def in_waiting(self) -> int:

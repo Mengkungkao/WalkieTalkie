@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
-# Copy the app to the Pi and install its Python dependencies.
+# Copy the app to a Raspberry Pi or Orange Pi and check its dependencies.
 #
 #   ./deploy.sh jarvis@192.168.0.33
+#   ./deploy.sh orangepi@192.168.0.130 --setup
+#
+# --setup then runs ./setup.sh on the device over an interactive ssh
+# session, so one command installs everything and adds the app to the
+# Whisplay HAT's desktop. It asks for the device's sudo password there.
 #
 # rsync excludes the venv and caches, so a redeploy over Wi-Fi to a Zero
 # 2 W moves a few tens of kilobytes rather than the whole tree.
 set -euo pipefail
 
-TARGET="${1:-}"
-REMOTE_DIR="${2:-WalkieTalkie}"
+RUN_SETUP=0
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --setup) RUN_SETUP=1 ;;
+        *)       POSITIONAL+=("$arg") ;;
+    esac
+done
+TARGET="${POSITIONAL[0]:-}"
+REMOTE_DIR="${POSITIONAL[1]:-WalkieTalkie}"
 if [ -z "$TARGET" ]; then
-    echo "usage: $0 user@host [remote-dir]" >&2
+    echo "usage: $0 user@host [remote-dir] [--setup]" >&2
     exit 1
 fi
 
@@ -36,7 +49,7 @@ echo "==> installing dependencies"
 ssh "${SSH_OPTS[@]}" "$TARGET" "bash -s" <<REMOTE
 set -euo pipefail
 cd "${REMOTE_DIR}"
-chmod +x run.sh install.sh provision_radio.py 2>/dev/null || true
+chmod +x run.sh install.sh setup.sh setup/*.sh provision_radio.py 2>/dev/null || true
 
 missing=""
 for pkg in serial yaml PIL numpy; do
@@ -49,7 +62,7 @@ fi
 
 python3 - <<'CHECK'
 import ctypes.util
-print("   libcodec2:", ctypes.util.find_library("codec2") or "NOT FOUND (sudo apt install libcodec2-1.2)")
+print("   libcodec2:", ctypes.util.find_library("codec2") or "NOT FOUND (./setup.sh installs it)")
 CHECK
 
 echo "   audio devices:"
@@ -57,7 +70,15 @@ arecord -l 2>/dev/null | grep '^card' || echo "     no capture device"
 aplay   -l 2>/dev/null | grep '^card' || echo "     no playback device"
 REMOTE
 
+if [ "$RUN_SETUP" = 1 ]; then
+    echo
+    echo "==> running setup on ${TARGET}"
+    # -t: setup asks before changing anything, and sudo wants a password.
+    exec ssh -t "${SSH_OPTS[@]}" "$TARGET" "cd ${REMOTE_DIR} && ./setup.sh"
+fi
+
 echo
-echo "==> deployed. On the Pi:"
-echo "    cd ${REMOTE_DIR} && ./install.sh      # register with the whisplay daemon"
+echo "==> deployed. On the device:"
+echo "    cd ${REMOTE_DIR} && ./setup.sh        # first time: board setup, then reboot"
+echo "    ./install.sh                          # register with the whisplay daemon"
 echo "    ./run.sh                              # or launch it from the HAT desktop"

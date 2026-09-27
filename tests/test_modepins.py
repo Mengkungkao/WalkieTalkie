@@ -70,6 +70,19 @@ def test_unreadable_gpio_is_not_treated_as_a_fault(monkeypatch):
     assert result["transparent"] is False
 
 
+def test_only_a_pi_has_its_registers_read(monkeypatch, tmp_path):
+    """An Orange Pi's pin registers are laid out differently; do not guess."""
+    compatible = tmp_path / "compatible"
+    monkeypatch.setattr(modepins, "DEVICE_TREE_COMPATIBLE", str(compatible))
+
+    compatible.write_bytes(b"xunlong,orangepi-zero2w\0allwinner,sun50i-h618\0")
+    assert modepins._broadcom_soc() is False
+    assert modepins._read(22, 27) is None
+
+    compatible.write_bytes(b"raspberrypi,model-zero-2-w\0brcm,bcm2837\0")
+    assert modepins._broadcom_soc() is True
+
+
 def test_check_and_warn_returns_the_same_shape(monkeypatch):
     fake_reader(monkeypatch, [(1, 1)])
     result = modepins.check_and_warn()

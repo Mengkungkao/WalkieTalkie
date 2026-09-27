@@ -23,7 +23,7 @@ play.
 from __future__ import annotations
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
-from app.ui.screens import CONTACTS, EDIT, INBOX, SETTINGS, STATUS, TALK
+from app.ui.screens import CONTACTS, EDIT, INBOX, PAIR, SETTINGS, STATUS, TALK
 
 # Actions the app implements. Names, not callables, so this module stays
 # free of app state and can be imported by the screens.
@@ -39,17 +39,20 @@ REPLAY_LAST = "replay_last"
 OPEN_SETTINGS = "open_settings"
 NEXT_SETTING = "next_setting"
 OPEN_SETTING = "open_setting"
+NEXT_FOUND = "next_found"
+PAIR_SELECTED = "pair_selected"
+BACK_SETTINGS = "back_settings"
 EXIT_APP = "exit_app"
 
 # Screens you pick from, rather than screens you are in. Two clicks opens
 # a row here and leaves everywhere else.
-MENU_SCREENS = (CONTACTS, SETTINGS)
+MENU_SCREENS = (CONTACTS, SETTINGS, PAIR)
 
 # Actions that move to a different screen. Used to check that no screen
 # can strand the operator.
 LEAVING_ACTIONS = {
     OPEN_TALK, OPEN_INBOX, OPEN_STATUS, OPEN_SETTINGS,
-    BACK_CONTACTS, BACK_TALK, EXIT_APP,
+    BACK_CONTACTS, BACK_TALK, BACK_SETTINGS, EXIT_APP,
 }
 
 # gesture -> (action, short label for the on-screen hint)
@@ -78,6 +81,12 @@ SCREEN_ACTIONS = {
         SINGLE: (NEXT_SETTING, "next"),
         DOUBLE: (OPEN_SETTING, "open"),
         TRIPLE: (BACK_CONTACTS, "back"),
+    },
+    # A menu of the radios heard pairing: two clicks picks one.
+    PAIR: {
+        SINGLE: (NEXT_FOUND, "next"),
+        DOUBLE: (PAIR_SELECTED, "pair"),
+        TRIPLE: (BACK_SETTINGS, "back"),
     },
 }
 

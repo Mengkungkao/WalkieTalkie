@@ -10,6 +10,11 @@ this app can sit on a battery all day:
   until a byte physically arrives.
 * **tx** parks in `queue.get()`. Zero CPU until something is queued.
 
+Everything is transmitted as a module broadcast, with the real
+destination in the packet header (see `protocol`), so this radio's
+address is `self.addr` -- the Device ID, changeable at runtime -- rather
+than whatever number is burned into the module's registers.
+
 The tx thread also paces fragments. The module buffers only one packet;
 firing a six-fragment voice message at it back-to-back overruns that
 buffer and the tail is silently dropped. So each fragment is followed by
@@ -20,6 +25,7 @@ the duty-cycle budget is charged and, when exhausted, waited out.
 from __future__ import annotations
 
 import itertools
+import os
 import queue
 import threading
 import time
@@ -89,6 +95,8 @@ class Stats:
     frames_dropped: int = 0
     messages_rx: int = 0
     self_addressed_drops: int = 0
+    overheard: int = 0
+    address_clashes: int = 0
     last_rssi: int | None = None
     airtime_used: float = 0.0
     queue_depth: int = 0
@@ -99,9 +107,12 @@ class LoraLink:
     """Reliable-ish message transport over the SX126X."""
 
     def __init__(self, radio: SX126x, air_speed: int = 9600,
-                 duty_cycle_percent: float = 1.0, callsign: str = ""):
+                 duty_cycle_percent: float = 1.0, callsign: str = "",
+                 addr: int | None = None, token: bytes | None = None):
         self.radio = radio
         self.callsign = callsign
+        self.addr = (radio.addr if addr is None else addr) & 0xFFFF
+        self.token = token or os.urandom(protocol.TOKEN_SIZE)
         self.budget = AirtimeBudget(air_speed, duty_cycle_percent)
         self.stats = Stats()
         self.peers: dict = {}
@@ -115,6 +126,7 @@ class LoraLink:
         self._on_message = None
         self._on_tx_progress = None
         self._on_hello = None
+        self._on_clash = None
         self._peers_lock = threading.Lock()
 
     # --- callbacks -----------------------------------------------------
@@ -135,6 +147,20 @@ class LoraLink:
         """
         self._on_hello = callback
 
+    def on_clash(self, callback):
+        """callback(name): another radio is using our Device ID.
+
+        Only a pairing beacon can reveal this, because only it carries a
+        token: any other packet with our address on it looks exactly like
+        our own transmission echoed back. Called on the receive thread.
+        """
+        self._on_clash = callback
+
+    def set_address(self, addr: int):
+        """Take a new Device ID. Effective from the next packet, both ways."""
+        self.addr = addr & 0xFFFF
+        log.info("device id is now %d", self.addr)
+
     # --- lifecycle -----------------------------------------------------
     def start(self):
         if self._running.is_set():
@@ -144,7 +170,7 @@ class LoraLink:
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
             self._threads.append(thread)
-        log.info("link up (callsign %r, addr %d)", self.callsign, self.radio.addr)
+        log.info("link up (callsign %r, addr %d)", self.callsign, self.addr)
 
     def stop(self):
         self._running.clear()
@@ -179,7 +205,12 @@ class LoraLink:
         if packet is None:
             self.stats.frames_dropped += 1
             return
-        if packet.src == self.radio.addr:
+        if packet.src == self.addr:
+            if packet.type == protocol.PAIR:
+                token, name = protocol.parse_pair(packet.body)
+                if token != self.token:
+                    self._report_clash(name)
+                    return
             # Normally our own broadcast heard back through a repeater. But
             # it is also what a second node misconfigured with our address
             # looks like -- and then this line silently eats every message
@@ -189,9 +220,17 @@ class LoraLink:
                 log.warning(
                     "dropped a %s packet claiming our own address (%d): either a "
                     "repeater echo, or another node is configured with the same "
-                    "address -- every node needs a unique radio.address",
+                    "Device ID -- pairing detects and fixes that",
                     protocol.TYPE_NAMES.get(packet.type, packet.type), packet.src,
                 )
+            return
+
+        if not packet.addressed_to(self.addr):
+            # Every radio hears every packet now. One meant for somebody
+            # else still proves its sender is on the air, but it is not
+            # ours to deliver.
+            self.stats.overheard += 1
+            self._touch_peer(packet.src, rssi)
             return
 
         self.stats.packets_rx += 1
@@ -203,12 +242,25 @@ class LoraLink:
         if message is not None:
             self._deliver(message, peer)
 
+    def _report_clash(self, name: str):
+        self.stats.address_clashes += 1
+        log.warning("%s is also using Device ID %d", name or "another radio", self.addr)
+        if self._on_clash:
+            try:
+                self._on_clash(name)
+            except Exception:
+                log.exception("clash handler failed")
+
     def _deliver(self, message, peer: Peer):
         self.stats.messages_rx += 1
         peer.messages += 1
 
         if message.type in (protocol.HELLO, protocol.HELLO_ACK):
             name = message.body.decode("utf-8", "replace").strip()[:20]
+            if name:
+                peer.name = name
+        elif message.type == protocol.PAIR:
+            _token, name = protocol.parse_pair(message.body)
             if name:
                 peer.name = name
 
@@ -297,21 +349,23 @@ class LoraLink:
         return peer
 
     # --- transmit ------------------------------------------------------
-    def _enqueue(self, dst: int, packets: list, label: str):
-        self._tx.put((dst, packets, label))
+    def _enqueue(self, dst: int, packets: list, label: str, report: bool = True):
+        # `report` is for the operator's progress bar and "sent" cue, which
+        # belong to messages they sent -- not to handshakes and beacons.
+        self._tx.put((dst, packets, label, report))
         self.stats.queue_depth = self._tx.qsize()
 
     def send_text(self, dst: int, text: str) -> int:
         msg_id = next(self._msg_ids)
         body = text.encode("utf-8")[: protocol.MAX_BODY * 255]
-        packets = protocol.fragment(protocol.TEXT, self.radio.addr, msg_id, body)
+        packets = protocol.fragment(protocol.TEXT, self.addr, msg_id, body, dst=dst)
         self._enqueue(dst, packets, f"text/{msg_id}")
         return msg_id
 
     def send_voice(self, dst: int, encoded: bytes, codec_mode: int) -> int:
         msg_id = next(self._msg_ids)
         packets = protocol.fragment(
-            protocol.VOICE, self.radio.addr, msg_id, encoded, flags=codec_mode
+            protocol.VOICE, self.addr, msg_id, encoded, flags=codec_mode, dst=dst
         )
         self._enqueue(dst, packets, f"voice/{msg_id}")
         return msg_id
@@ -319,10 +373,20 @@ class LoraLink:
     def _send_named(self, type_: int, dst: int, label: str) -> int:
         msg_id = next(self._msg_ids)
         packets = protocol.fragment(
-            type_, self.radio.addr, msg_id,
-            self.callsign.encode("utf-8")[: protocol.MAX_BODY],
+            type_, self.addr, msg_id,
+            self.callsign.encode("utf-8")[: protocol.MAX_BODY], dst=dst,
         )
-        self._enqueue(dst, packets, label)
+        self._enqueue(dst, packets, label, report=False)
+        return msg_id
+
+    def send_pair(self) -> int:
+        """Announce that this radio is pairing, to anyone else who is."""
+        msg_id = next(self._msg_ids)
+        packets = protocol.fragment(
+            protocol.PAIR, self.addr, msg_id,
+            protocol.pair_body(self.token, self.callsign),
+        )
+        self._enqueue(protocol.BROADCAST, packets, "pair", report=False)
         return msg_id
 
     def send_hello(self, dst: int = protocol.BROADCAST) -> int:
@@ -355,11 +419,11 @@ class LoraLink:
             item = self._tx.get()
             if item is None:
                 return
-            dst, packets, label = item
+            dst, packets, label, report = item
             self.stats.queue_depth = self._tx.qsize()
-            self._transmit(dst, packets, label)
+            self._transmit(dst, packets, label, report)
 
-    def _transmit(self, dst: int, packets: list, label: str):
+    def _transmit(self, dst: int, packets: list, label: str, report: bool = True):
         total = len(packets)
         for index, packet in enumerate(packets):
             if not self._running.is_set():
@@ -380,7 +444,9 @@ class LoraLink:
                 time.sleep(wait)
 
             try:
-                self.radio.send(dst, frame)
+                # A module broadcast whatever the destination: the header
+                # carries `dst`, and receivers filter on it themselves.
+                self.radio.send(protocol.BROADCAST, frame)
             except Exception:
                 log.exception("transmit failed for %s", label)
                 self.stats.errors.append("tx failed")
@@ -391,7 +457,7 @@ class LoraLink:
             self.stats.packets_tx += 1
             self.stats.bytes_tx += len(frame)
 
-            if self._on_tx_progress:
+            if report and self._on_tx_progress:
                 try:
                     self._on_tx_progress(index + 1, total)
                 except Exception:

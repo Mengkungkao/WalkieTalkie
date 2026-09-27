@@ -46,8 +46,9 @@ from app.ui import navigation, screens, theme
 from app.ui.display import Display
 from app.ui.editors import (ChoiceEditor, ClockEditor, ConfirmEditor,
                             DigitEditor)
-from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PLAYING, RECEIVING,
-                            RECORDING, SENDING, SETTINGS, TALK, ViewState)
+from app.ui.screens import (CONTACTS, EDIT, IDLE, INBOX, PAIR, PLAYING,
+                            RECEIVING, RECORDING, SENDING, SETTINGS, TALK,
+                            ViewState)
 from app.utils import battery, clock
 from app.utils.logger import get_logger
 from app.utils.single_instance import AlreadyRunning, SingleInstance
@@ -71,8 +72,28 @@ MIN_TALK_SECONDS = 0.4
 # How often to re-call an unlinked station while its Talk page is open.
 RECALL_SECONDS = 45.0
 
+# Pairing. A beacon is ~20 bytes -- about 50 ms of air at 9600 bps -- so
+# a full two-minute window costs a few seconds of the hour's 36.
+PAIR_BEACON_SECONDS = 3.0
+PAIR_WINDOW_SECONDS = 120.0
+# How long to wait for the other operator to accept before saying so.
+PAIR_ANSWER_SECONDS = 30.0
+# At most one reply a radio that is not pairing sends to a clashing one.
+CLASH_REPLY_SECONDS = 10.0
+
 
 class WalkieApp:
+    # Defaults for state that __init__ would otherwise have to set before
+    # anything can run; tests build the app without hardware via __new__.
+    link = None
+    _pairing = False
+    _pairing_until = 0.0
+    _pairing_with = None
+    _pair_found = None
+    _pair_beacon_due = 0.0
+    _last_clash_reply = -CLASH_REPLY_SECONDS
+    _return_screen = SETTINGS
+
     def __init__(self, settings):
         self.settings = settings
         self.running = True
@@ -182,6 +203,7 @@ class WalkieApp:
             self.radio, air_speed=radio_settings.air_speed,
             duty_cycle_percent=radio_settings.duty_cycle_percent,
             callsign=self.settings.identity.callsign,
+            addr=radio_settings.address, token=self.overrides.node_token,
         )
         # The module is deaf unless M0/M1 are both low, and on this
         # hardware the LCD drives those pins. Say so rather than letting
@@ -213,6 +235,7 @@ class WalkieApp:
         self.link.on_message(self._on_radio_message)
         self.link.on_tx_progress(self._on_tx_progress)
         self.link.on_hello(self._on_hello)
+        self.link.on_clash(self._on_clash)
         self.link.start()
 
     def _refresh_audio_state(self):
@@ -313,6 +336,9 @@ class WalkieApp:
             navigation.OPEN_SETTINGS: self._open_settings,
             navigation.NEXT_SETTING: self._next_setting,
             navigation.OPEN_SETTING: self._open_setting,
+            navigation.NEXT_FOUND: self._next_found,
+            navigation.PAIR_SELECTED: self._pair_selected,
+            navigation.BACK_SETTINGS: self._leave_pairing,
         }
 
     def _go(self, screen: str):
@@ -361,8 +387,9 @@ class WalkieApp:
         if self.state.busy or not self.foregrounded:
             return
         addr, name = self._pending_hello
+        verb = "wants to pair" if self._pairing else "is calling"
         self._begin_edit(
-            ConfirmEditor(f"{name} is calling", f"address {addr}\naccept and add as a contact?"),
+            ConfirmEditor(f"{name} {verb}", f"ID {addr}\naccept and add as a contact?"),
             "CALLING",
         )
 
@@ -373,11 +400,12 @@ class WalkieApp:
         addr, name = pending
         if accepted:
             self.link.accept(addr)
-            if self.overrides.add_contact(name, addr):
-                self.settings.contacts.append(Contact(name=name, address=addr))
-                self.roster = Roster(self.settings.contacts, self.settings.data_dir)
-            self._refresh_entries()
-            self.state.flash(f"{name} connected")
+            self._add_contact(name, addr)
+            if self._pairing:
+                self._finish_pairing(addr, name)
+            else:
+                self._refresh_entries()
+                self.state.flash(f"{name} connected")
         else:
             self.link.refuse(addr)
             self.state.flash(f"{name} refused")
@@ -417,10 +445,12 @@ class WalkieApp:
             str(base) if base is not None else "not set",
         )
         return [
+            {"key": "pair", "label": "Pair device",
+             "value": "find radios nearby and connect"},
             {"key": "device_id", "label": "Device ID",
              "value": f"{self.settings.radio.address}  ({self.settings.identity.callsign})"},
             {"key": "base", "label": "Base station", "value": base_name},
-            {"key": "add", "label": "Add device", "value": "pair another radio by address"},
+            {"key": "add", "label": "Add by ID", "value": "type another radio's ID"},
             {"key": "clock", "label": "Date & time",
              "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
             {"key": "reset", "label": "Reset all data",
@@ -444,6 +474,7 @@ class WalkieApp:
         items = self.state.settings_items or self._settings_items()
         key = items[self.state.settings_index % len(items)]["key"]
         opener = {
+            "pair": self._start_pairing,
             "device_id": self._edit_device_id, "base": self._edit_base,
             "add": self._edit_add_device, "clock": self._edit_clock,
             "reset": self._edit_reset,
@@ -451,6 +482,10 @@ class WalkieApp:
         opener()
 
     def _begin_edit(self, editor, title: str, hint: str = ""):
+        # Where to go when it closes: an incoming call can interrupt any
+        # screen, and answering it should not strand you in Settings.
+        if self.state.screen != EDIT:
+            self._return_screen = self.state.screen
         self.state.editor = editor
         self.state.editor_title = title
         self.state.editor_hint = hint
@@ -493,7 +528,7 @@ class WalkieApp:
             return
         title = self.state.editor_title
         self.state.editor = None
-        self.state.screen = SETTINGS
+        self.state.screen = self._return_screen
         if editor.cancelled:
             if title == "CALLING":
                 self._apply_hello_decision(False)
@@ -526,19 +561,33 @@ class WalkieApp:
             self.state.flash("that is a contact's ID", 4.0)
             self.player.cue(self.cues.error)
             return
+        old = self.settings.radio.address
         self.overrides.set("radio", "address", address)
+        self._set_address(address)
+        # Effective at once: addressing is in the packet header, not the
+        # module's registers. But radios that paired with the old ID still
+        # have it saved, and will be calling a number nobody answers.
+        self.state.flash(f"ID {address} · re-pair others", 5.0)
+        log.info("device id changed %d -> %d; radios paired with %d must pair again",
+                 old, address, old)
+
+    def _set_address(self, address: int):
+        """Use a new Device ID from now on. The caller persists it."""
         self.settings.radio.address = address
-        # The module filters incoming packets on the address in its own
-        # registers, which only provision_radio.py can change -- and that
-        # needs the LCD's GPIO pins. So this takes effect for our own
-        # outgoing src, and the radio must be reprovisioned to match.
         self.state.address = address
-        self.state.flash(f"ID {address} — reprovision the module", 6.0)
-        log.warning(
-            "device id changed to %d; the module still filters on its "
-            "provisioned address. Run: sudo ./tools/provision.sh --address %d",
-            address, address,
-        )
+        if self.link is not None:
+            self.link.set_address(address)
+        # Cues are pitched by address, so this radio's sound moves with it.
+        self.cues = cues_for(address, self.settings.identity.callsign)
+
+    def _add_contact(self, name: str, address: int) -> bool:
+        """Save a station as a contact. False if it already was one."""
+        if not self.overrides.add_contact(name, address):
+            return False
+        self.settings.contacts.append(Contact(name=name, address=address))
+        self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+        self._refresh_entries()
+        return True
 
     def _apply_add_device(self, address: int):
         if address == self.settings.radio.address:
@@ -546,13 +595,154 @@ class WalkieApp:
             self.player.cue(self.cues.error)
             return
         name = f"node {address}"
-        if self.overrides.add_contact(name, address):
-            self.settings.contacts.append(Contact(name=name, address=address))
-            self.roster = Roster(self.settings.contacts, self.settings.data_dir)
-            self._refresh_entries()
+        if self._add_contact(name, address):
             self.state.flash(f"added {name}")
         else:
             self.state.flash("already known")
+
+    # --- pairing ------------------------------------------------------------
+    # Both operators open Settings > Pair device. Each radio beacons while
+    # the screen is open and lists the other radios it hears beaconing.
+    # Picking one calls it with an ordinary hello; its operator gets the
+    # usual accept prompt, and accepting makes each a contact of the
+    # other. Nothing is added on one side only: the caller saves the
+    # contact when the answer arrives, not when it asks.
+    def _start_pairing(self):
+        if self.link is None:
+            self.state.flash("radio offline")
+            self.player.cue(self.cues.error)
+            return
+        self._pairing = True
+        self._pairing_until = time.monotonic() + PAIR_WINDOW_SECONDS
+        self._pair_beacon_due = 0.0           # announce straight away
+        self._pair_found = {}
+        self._pairing_with = None
+        self.state.pair_index = 0
+        self.state.pair_status = "looking for radios"
+        self._refresh_pair_view()
+        self.state.screen = PAIR
+        log.info("pairing: announcing as %s (ID %d)",
+                 self.settings.identity.callsign, self.settings.radio.address)
+
+    def _stop_pairing(self, then: str | None = None):
+        """End pairing; if the pairing screen is up, move to `then`."""
+        self._pairing = False
+        self._pairing_with = None
+        if then is None:
+            return
+        if self.state.screen == PAIR:
+            self.state.screen = then
+        elif self.state.screen == EDIT and self._return_screen == PAIR:
+            self._return_screen = then
+
+    def _leave_pairing(self):
+        self._stop_pairing(SETTINGS)
+        self._refresh_settings()
+
+    def _finish_pairing(self, addr: int, name: str):
+        self._stop_pairing(CONTACTS)
+        self.roster.select_address(addr)
+        self._refresh_entries()
+        self.state.flash(f"paired with {name}", 4.0)
+        log.info("pairing: paired with %s (%d)", name, addr)
+
+    def _refresh_pair_view(self):
+        # Discovery order, not signal or recency: re-sorting on every
+        # beacon would move the row under the operator's cursor.
+        known = {c.address for c in self.settings.contacts}
+        self.state.pair_found = [
+            (addr, info["name"], info["rssi"], addr in known)
+            for addr, info in (self._pair_found or {}).items()
+        ]
+
+    def _next_found(self):
+        found = self.state.pair_found
+        if not found:
+            self.state.flash("none found yet")
+            return
+        self.state.pair_index = (self.state.pair_index + 1) % len(found)
+
+    def _pair_selected(self):
+        found = self.state.pair_found
+        if not found or self.link is None:
+            self.state.flash("none found yet")
+            return
+        addr, name, _rssi, _known = found[self.state.pair_index % len(found)]
+        self._pairing_with = (addr, name, time.monotonic())
+        self.state.pair_status = f"waiting for {name} to accept"
+        log.info("pairing: asking %s (%d)", name, addr)
+        self.link.send_hello(addr)
+
+    def _on_pair_beacon(self, message, peer):
+        """Someone nearby is pairing. On the rx thread."""
+        if not self._pairing:
+            return  # nobody here asked to see it
+        name = peer.name or f"node {message.src}"
+        fresh = message.src not in self._pair_found
+        self._pair_found[message.src] = {"name": name, "rssi": message.rssi_dbm}
+        self._refresh_pair_view()
+        if fresh:
+            log.info("pairing: found %s (%d)", name, message.src)
+            # Answer now rather than on the next beacon, so the other
+            # radio lists us as soon as we listed it.
+            self._pair_beacon_due = 0.0
+        self._wake.set()
+
+    def _pairing_answer(self, addr: int, name: str, accepted: bool):
+        """The radio we asked has answered. On the rx thread."""
+        if not self._pairing or not self._pairing_with \
+                or self._pairing_with[0] != addr:
+            return
+        self._pairing_with = None
+        if accepted:
+            self._add_contact(name, addr)
+            self._finish_pairing(addr, name)
+        else:
+            self.state.pair_status = f"{name} said no"
+
+    def _on_clash(self, name: str):
+        """Another radio is beaconing with our Device ID. On the rx thread."""
+        if self._pairing:
+            # This is the radio being set up, so this is the one that moves.
+            old = self.settings.radio.address
+            taken = {c.address for c in self.settings.contacts} | {old}
+            if self.link is not None:
+                taken |= set(self.link.peers)
+            new = self.overrides.assign_address(taken)
+            self._set_address(new)
+            self._pair_beacon_due = 0.0       # announce the new ID at once
+            self.state.flash(f"ID {old} was taken: now {new}", 5.0)
+            log.warning("pairing: %s also uses ID %d; this radio is now %d",
+                        name or "another radio", old, new)
+        elif time.monotonic() - self._last_clash_reply >= CLASH_REPLY_SECONDS:
+            # Not the one being set up: answer, so the radio that is
+            # pairing hears the clash and moves itself.
+            self._last_clash_reply = time.monotonic()
+            if self.link is not None:
+                self.link.send_pair()
+        self._wake.set()
+
+    def _pairing_tick(self):
+        """Beacon, and time out, while pairing. Called from the main loop."""
+        now = time.monotonic()
+        if now >= self._pairing_until:
+            log.info("pairing: window closed")
+            self._stop_pairing(SETTINGS)
+            self._refresh_settings()
+            self.state.flash("pairing timed out", 3.0)
+            return
+        if self._pairing_with and now - self._pairing_with[2] >= PAIR_ANSWER_SECONDS:
+            self.state.pair_status = f"no answer from {self._pairing_with[1]}"
+            self._pairing_with = None
+        if now >= self._pair_beacon_due and self.link is not None:
+            self.link.send_pair()
+            self._pair_beacon_due = now + PAIR_BEACON_SECONDS
+
+    def _pairing_deadline(self) -> float:
+        deadlines = [self._pair_beacon_due, self._pairing_until]
+        if self._pairing_with:
+            deadlines.append(self._pairing_with[2] + PAIR_ANSWER_SECONDS)
+        return max(0.05, min(deadlines) - time.monotonic())
 
     def _apply_reset(self):
         log.warning("resetting all app data at the operator's request")
@@ -667,7 +857,7 @@ class WalkieApp:
 
     def _record_outgoing(self, target, duration: float, size: int):
         sent = protocol.Message(
-            type=protocol.VOICE, src=self.radio.addr, msg_id=0, body=b"",
+            type=protocol.VOICE, src=self.settings.radio.address, msg_id=0, body=b"",
             flags=self.codec_mode, missing=[], rssi_dbm=None,
             received_at=time.time(),
         )
@@ -678,6 +868,11 @@ class WalkieApp:
     # --- receiving ------------------------------------------------------
     def _on_radio_message(self, message, peer):
         """Called on the link's rx thread; must not block it for long."""
+        if message.type == protocol.PAIR:
+            # Before the roster: a stranger pairing across the street is
+            # not someone to list among your stations.
+            self._on_pair_beacon(message, peer)
+            return
         self.roster.note_peer(message.src, peer.name, message.rssi_dbm)
         self.roster.save()
         self.state.last_rssi = message.rssi_dbm
@@ -686,6 +881,12 @@ class WalkieApp:
         if message.type == protocol.HELLO:
             self._refresh_entries()
             self.state.flash(f"{peer.name or message.src} on air")
+            self._wake.set()
+            return
+        if message.type in (protocol.HELLO_ACK, protocol.REJECT):
+            self._pairing_answer(message.src, peer.name or f"node {message.src}",
+                                 message.type == protocol.HELLO_ACK)
+            self._refresh_entries()
             self._wake.set()
             return
 
@@ -816,6 +1017,11 @@ class WalkieApp:
             }
         self.state.unread = self.inbox.unread
 
+        # Leaving the pairing screen any way at all -- a hold to talk, say
+        # -- ends pairing, so it never beacons behind another screen.
+        if self._pairing and self.state.screen not in (PAIR, EDIT):
+            self._stop_pairing()
+
         # Link state for the contact dots and the Talk screen's warning.
         self.state.link_states = self._link_states()
         selected = self.roster.selected()
@@ -904,6 +1110,8 @@ class WalkieApp:
             deadlines.append(self.settings.power.tick_seconds)
         if self.settings.power.beacon_interval_seconds:
             deadlines.append(max(1.0, self._beacon_due - time.monotonic()))
+        if self._pairing:
+            deadlines.append(self._pairing_deadline())
         if self.state.battery_present:
             # A wakeup a minute is nothing against a device drawing half
             # an amp, and it is exactly when the charge matters.
@@ -946,6 +1154,8 @@ class WalkieApp:
             self._wake.wait(timeout)
             self._wake.clear()
 
+            if self._pairing:
+                self._pairing_tick()
             if self.link is not None:
                 if self.link.reassembling:
                     self.link.tick()

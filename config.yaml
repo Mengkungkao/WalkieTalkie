@@ -6,9 +6,10 @@
 
 radio:
   port: /dev/ttyS0
-  # This node's address, 0-65534. Every radio on the channel needs a
-  # different one. 65535 is reserved for broadcast.
-  address: 5
+  # This radio's Device ID, 0-65534 (65535 is broadcast). "auto" picks an
+  # unused one on first start and keeps it in ~/.whisplay-walkie. Change
+  # it on the device under Settings > Device ID; it takes effect at once.
+  address: auto
   frequency_mhz: 868
   # Air rate, not UART rate. Higher is faster but shorter-ranged; 9600
   # keeps a ~1 km line-of-sight link while sending a 10 s voice message
@@ -29,7 +30,8 @@ radio:
   wired_mode_pins: [22, 27]
 
 identity:
-  callsign: whisplay
+  # The name other radios see. "auto" uses this machine's hostname.
+  callsign: auto
 
 audio:
   # "auto" picks the Whisplay card when it exists, else the first real
@@ -66,11 +68,8 @@ power:
   beacon_interval_seconds: 0
   tick_seconds: 5
 
-# Paired devices. These appear on the contacts screen whether or not the
-# other radio is switched on. Stations not listed here still show up
-# automatically once they transmit.
-contacts:
-  - name: Base
-    address: 1
-  - name: Rover
-    address: 2
+# Contacts. Normally left empty: pair radios on the device instead, under
+# Settings > Pair device, which saves them per device. Entries here are
+# shown on every radio that uses this file, whether or not the other
+# radio is switched on.
+contacts: []

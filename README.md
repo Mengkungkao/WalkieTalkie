@@ -98,10 +98,9 @@ look unclaimed in `gpioinfo` but are in use.
 and fine if the radio never needs reconfiguring again.
 
 The catch is that configuration mode needs **M1 high**, so grounded pins
-mean the module can never be reprovisioned without unsoldering — and
-that includes changing **Device ID from the Settings screen**, which is
-only half-applied until the module is reprovisioned to match. If you
-expect to change addresses, frequency or air rate, take option A.
+mean the module can never be reprovisioned without unsoldering. Device
+IDs are not affected — they live in the app, not the module — but if you
+expect to change frequency or air rate, take option A.
 
 **2. A serial console will corrupt every transmission.** Raspberry Pi OS
 puts a kernel console and a login prompt on `/dev/ttyS0` by default —
@@ -125,16 +124,26 @@ cd WalkieTalkie
 > ways through that — agent forwarding, a deploy key, or an account key
 > — and the errors each one produces when it is the wrong choice.
 
-`setup.sh` walks all eight steps below, asks before it changes anything,
-and is safe to re-run. `--check` reports without changing; `--yes` runs
-unattended.
+`setup.sh` works out whether it is on a Raspberry Pi or an Orange Pi
+Zero 2W and runs [setup/raspberrypi.sh](setup/raspberrypi.sh) or
+[setup/orangepi.sh](setup/orangepi.sh); `--board orangepi` overrides the
+guess. Either one walks all eight steps below, asks before it changes
+anything, and is safe to re-run. `--check` reports without changing;
+`--yes` runs unattended. The Orange Pi differs in a few places — see
+[Orange Pi Zero 2W](#orange-pi-zero-2w).
 
-From a development machine, push to the Pi and run it there:
+From a development machine, one command copies the project over,
+installs it, and adds **WalkieTalkie** to the Whisplay HAT's desktop. It
+opens an ssh session for setup's questions and the device's sudo
+password:
 
 ```bash
-./deploy.sh jarvis@192.168.0.33
-ssh jarvis@192.168.0.33 'cd WalkieTalkie && ./setup.sh'
+./deploy.sh jarvis@192.168.0.33 --setup
 ```
+
+Nothing else needs configuring by hand. A fresh install picks its own
+Device ID and uses the hostname as its name; to talk to another radio,
+pair with it from the app — see [Pairing](#pairing).
 
 ### The long way, step by step
 
@@ -154,6 +163,9 @@ is no Python wheel to build and no `-dev` package needed. Verify:
 python3 -c "import ctypes.util; print(ctypes.util.find_library('codec2'))"
 # libcodec2.so.1.2
 ```
+
+Debian 12 and Ubuntu 22.04 package it as `libcodec2-1.0` instead; that
+works too, and `setup.sh` picks whichever the release has.
 </details>
 
 <details open>
@@ -234,13 +246,14 @@ survive power cycles, so this is done once, not at every start.
 
 ```bash
 sudo systemctl stop whisplay-daemon
-python3 provision_radio.py --address 5 --frequency 868
+python3 provision_radio.py --frequency 868
 sudo systemctl start whisplay-daemon
 ```
 
-**Every radio on the channel needs a different `--address`** (0–65534;
-65535 is broadcast) and the **same `--frequency`**. Read back what a
-module currently holds without changing it:
+Every module gets the **same** settings — the same `--frequency` and air
+rate. The address the module stores no longer matters: the app puts the
+destination in its own packet header, so a provisioned LoRa HAT works in
+any radio. Read back what a module currently holds without changing it:
 
 ```bash
 python3 provision_radio.py --check
@@ -250,23 +263,22 @@ python3 provision_radio.py --check
 <details open>
 <summary><b>Step 6 — Configure the app</b></summary>
 
-Edit [config.yaml](config.yaml) — at minimum your callsign, this node's
-address, and the stations you want on the contacts screen:
+Usually nothing to do. The shipped [config.yaml](config.yaml) leaves
+identity to the device, and contacts come from pairing:
 
 ```yaml
 identity:
-  callsign: Rover
+  callsign: auto         # this machine's hostname
 radio:
-  address: 5             # unique per radio
+  address: auto          # an unused Device ID, picked on first start and kept
   frequency_mhz: 868
   duty_cycle_percent: 1.0  # ETSI EU868. Raise only where licensed.
-contacts:
-  - {name: Base,    address: 1}
-  - {name: Hilltop, address: 2}
+contacts: []             # pair on the device: Settings > Pair device
 ```
 
-Stations not listed here still appear on the contacts screen
-automatically once they transmit.
+Set `callsign` to name a radio something other than its hostname.
+Stations you have not paired with still appear on the contacts screen
+once they transmit.
 </details>
 
 <details open>
@@ -296,6 +308,47 @@ to `~/.whisplay-daemon/daemon-app.log`; raise the level with
 `WALKIE_LOG_LEVEL=DEBUG ./run.sh`.
 </details>
 
+### Orange Pi Zero 2W
+
+Both HATs fit its 40-pin header. Set up from a development machine the
+same way as a Pi:
+
+```bash
+./deploy.sh orangepi@192.168.0.130 --setup   # asks for sudo; reboot when told
+ssh orangepi@192.168.0.130 'cd WalkieTalkie && ./setup.sh --check'   # after it
+```
+
+[setup/orangepi.sh](setup/orangepi.sh) handles what is different from the Pi:
+
+- **The LoRa port is the debug console.** Header pins 8/10 are UART0
+  (`/dev/ttyS0`). Orange Pi OS ships with `console=both`, and logs a
+  shell in on that port automatically: whatever the radio receives is
+  typed into it, and the shell's output is transmitted. The console is
+  set in `/boot/orangepiEnv.txt` (`armbianEnv.txt` on Armbian), not
+  `cmdline.txt`; setup changes it to `console=display`, which also stops
+  the auto-login after a reboot. U-Boot still prints to the port for a
+  moment at power-on.
+- **The Whisplay HAT needs PiSugar's Orange Pi driver.** It enables SPI1
+  for the LCD and adds the `whisplaysound` card, which the app picks
+  automatically. Without it the app runs headless, with no screen or
+  button:
+
+  ```bash
+  git clone --depth 1 https://github.com/PiSugar/Whisplay.git ~/Whisplay
+  cd ~/Whisplay && sudo bash script/install_orangepi_zero2w.sh
+  sudo reboot
+  ```
+
+- **The M0/M1 clash is the same.** The jumpers land on header pins 15
+  and 13, which here are PI5 and PH3, the Whisplay backlight and DC
+  lines. Remove the jumpers exactly as on the Pi.
+- **The radio cannot be provisioned from the Orange Pi yet.**
+  `provision_radio.py` and `radio.mode_pins` drive M0/M1 through
+  `RPi.GPIO`, which only runs on a Raspberry Pi. The settings are stored
+  in the module, and every module gets the same ones, so provision the
+  LoRa HAT once on any Pi, then move it across. Device ID and pairing are
+  in the app and work the same on both boards.
+
 ---
 
 ## Using it
@@ -307,12 +360,13 @@ to `~/.whisplay-daemon/daemon-app.log`; raise the level with
 | **Inbox** | next message | back to Talk | play it | talk |
 | **Status** | Contacts | Contacts | Settings | talk |
 | **Settings** | next setting | open it | back to Contacts | talk |
+| **Pair** | next radio found | pair with it | back to Settings | talk |
 | *editor* | change value | next field / save | cancel | — |
 
 Four clicks exits from anywhere. Hold-to-talk works on every screen —
 you should never have to navigate somewhere before you can answer.
 
-There are two kinds of screen. **Menus** — Contacts and Settings — are
+There are two kinds of screen. **Menus** — Contacts, Settings and Pair — are
 lists you pick from, so two clicks opens the highlighted row and three
 goes back. **Views** — Talk, Inbox and Status — are places you already
 are, so two clicks leaves. Three clicks means play wherever there is
@@ -387,6 +441,48 @@ The contacts screen shows the state as a dot: **filled green** answered,
 handshaked, **grey** never heard. Talk says `not connected` under the
 disc before you transmit, and Status has a `link` row.
 
+### Pairing
+
+Pairing is how two radios find each other without anyone typing an ID.
+On **both** radios: **Status → 3 clicks → Settings → Pair device**.
+
+```
+this radio: orangepizero2w · ID 40213
+        looking for radios
+
+ ┌──────────────────────────────┐
+ │ jarvis                       │   ← 1 click next, 2 clicks pair
+ │ ID 1234  ·  strong           │
+ └──────────────────────────────┘
+```
+
+1. Each radio announces itself every 3 seconds while the screen is open,
+   and lists the other radios it hears doing the same.
+2. On one radio, highlight the other and **2 clicks** to pair. It shows
+   `waiting for jarvis to accept`.
+3. The other radio asks its operator: *orangepizero2w wants to pair —
+   accept and add as a contact?* It starts on **no**, so click onto
+   **YES**, then 2 clicks.
+4. Both radios save each other as contacts and are connected. The one
+   that asked jumps to Contacts with the new station selected.
+
+A refusal says so (`jarvis said no`), and nothing is saved on either
+side: the radio that asked only adds the contact once the answer is yes.
+The pairing window closes by itself after two minutes, and leaving the
+screen — 3 clicks, or holding to talk — stops it. A beacon is about 20
+bytes, so two minutes of pairing costs a few seconds of the hour's
+duty-cycle budget. Radios that are not pairing ignore the beacons, so a
+stranger pairing nearby never shows up on your contacts screen.
+
+**Two radios with the same ID.** Every radio used to ship as address 5,
+and two radios on one address cannot talk — each discards the other's
+packets as its own echo. Fresh installs now pick a random ID, so this is
+rare, and pairing catches it when it happens: each beacon carries a
+random token the radio chose at install time. A radio that hears its own
+ID with someone else's token knows it has a twin. If it is the one
+pairing, it picks a new ID and says so (`ID 5 was taken: now 40213`); if
+not, it answers once so the pairing radio learns of the clash and moves.
+
 ## Settings
 
 Everything that identifies a node can be set on the device, with the
@@ -394,9 +490,10 @@ button — no editing files over SSH. **Status → 3 clicks → Settings.**
 
 | Setting | What it does |
 |---|---|
-| **Device ID** | this node's radio address, 0–65534 |
+| **Pair device** | find radios nearby and connect — see [Pairing](#pairing) |
+| **Device ID** | this radio's ID, 0–65534; takes effect at once |
 | **Base station** | which contact counts as base |
-| **Add device** | pair another radio by address |
+| **Add by ID** | add a radio as a contact by typing its ID |
 | **Date & time** | fixes timestamps on a Pi with no RTC |
 | **Reset all data** | erases messages, voice clips, roster and settings |
 
@@ -417,18 +514,24 @@ device's address must be unique to it. Precedence is defaults <
 `config.yaml` < device settings < environment, so a one-off
 `WALKIE_RADIO_ADDRESS=9 ./run.sh` still wins for debugging.
 
-> **Changing Device ID does not reprovision the radio.** The module
-> filters incoming packets using the address in its own registers, and
-> only `provision_radio.py` can change that — which needs the LCD's GPIO
-> pins. After changing the ID, run
-> `sudo ./tools/provision.sh --address <id>` so the module agrees. The
-> app says so on screen and in the log.
+**Device ID takes effect immediately.** It used to need the module
+reprovisioning, because the module dropped packets not addressed to the
+number in its own registers — and rewriting those needs the mode pins,
+which the LCD owns on a Pi and which an Orange Pi cannot drive at all.
+Now every packet is a module broadcast carrying its destination in the
+header, and the app filters on that itself. Radios that paired with the
+old ID still have it saved, so pair with them again; the app reminds you
+(`ID 9 · re-pair others`).
 
-**Every node needs a unique address.** Two nodes sharing one cannot talk:
-each discards the other's traffic as its own echo. The app refuses a
-contact that shares this node's address at startup, counts and explains
-the dropped packets, and `deploy.sh` no longer copies `config.yaml`
-between devices — which used to hand every node the same identity.
+**Every radio needs a unique ID.** Two radios sharing one cannot talk:
+each discards the other's traffic as its own echo. Fresh installs pick a
+random one, pairing detects and fixes clashes, the app refuses a contact
+that shares this radio's ID, and `deploy.sh` never copies `config.yaml`
+between devices.
+
+**Upgrading from an older version.** The packet header changed (protocol
+v2), so update every radio. An updated radio still hears an old one, but
+an old radio cannot hear an updated one.
 
 ## The backlight is also the radio's M0
 
@@ -535,10 +638,16 @@ backlight deadline arrives. How:
 ### On-air format
 
 ```
-[ dst_hi dst_lo chan ]   consumed by the module (fixed-point addressing)
-[ AA 55 | len | header(7) | body | crc16 ]   ← what goes on the air
-         header: ver+type | src(2) | msg_id | seq | total | flags
+[ FF FF chan ]   consumed by the module: always a module broadcast
+[ AA 55 | len | header(9) | body | crc16 ]   ← what goes on the air
+         header: ver+type | src(2) | dst(2) | msg_id | seq | total | flags
 ```
+
+Every radio on the channel hears every packet and keeps those whose
+`dst` is its own Device ID or broadcast. That moved addressing out of the
+module's registers and into the app, which is what lets Device ID and
+pairing work without reprovisioning. It is not a privacy change: any
+module on the channel could always listen to everything.
 
 The module strips the first three bytes before transmitting and appends
 one RSSI byte to everything it receives. Framing is length-prefixed
@@ -623,10 +732,15 @@ a duty-cycle exhaustion — entirely in software.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `ModuleNotFoundError: No module named 'serial'` | System packages not installed | `./setup.sh` (step 2), or Step 1 by hand |
 | `No such file or directory: '/dev/ttyS0'` | UART disabled | Step 2, then reboot |
-| Garbled or one-way traffic | Login console on the port | Step 3 |
+| Garbled or one-way traffic | Login console on the port | Step 3; on an Orange Pi, `./setup.sh` and reboot |
+| `fuser -v /dev/ttyS0` shows `bash` (Orange Pi) | Auto-login shell on the console | `./setup.sh` and reboot |
+| `cannot drive M0/M1 on this board` | Provisioning from an Orange Pi | Provision the HAT on a Pi |
 | `radio offline` on screen | Port busy or HAT unseated | `fuser -v /dev/ttyS0` |
-| Nothing received | Address or frequency mismatch | `provision_radio.py --check` on both |
+| Nothing received | Frequency or air-rate mismatch | `provision_radio.py --check` on both |
+| An old radio stopped hearing an updated one | Protocol v2 | Update every radio |
+| A paired radio stopped answering after an ID change | It still has the old ID | Pair again |
 | `no microphone` / `no audio hardware` | Sound card not registered | See below |
 | Screen black after exiting the app | Fixed — see below | Update; the app now hands the backlight back lit |
 | Screen black after returning to the app | Fixed — see below | Update; the app re-attaches on the daemon's grant |

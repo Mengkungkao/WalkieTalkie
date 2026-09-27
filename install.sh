@@ -31,7 +31,7 @@ for module in ("serial", "yaml", "PIL", "numpy"):
         print(f"    {module:<8} MISSING")
         ok = False
 lib = ctypes.util.find_library("codec2")
-print(f"    codec2   {lib or 'MISSING -- sudo apt install libcodec2-1.2'}")
+print(f"    codec2   {lib or 'MISSING -- ./setup.sh installs it'}")
 for tool in ("arecord", "aplay"):
     print(f"    {tool:<8} {shutil.which(tool) or 'MISSING -- sudo apt install alsa-utils'}")
 sys.exit(0 if ok else 1)
@@ -44,7 +44,8 @@ if [ ! -e /dev/ttyS0 ]; then
 elif fuser /dev/ttyS0 >/dev/null 2>&1; then
     echo "    WARNING: /dev/ttyS0 is held by: $(fuser -v /dev/ttyS0 2>&1 | tail -1)"
     echo "    A login console on the LoRa port corrupts every transmission."
-    echo "    Remove console=serial0,115200 from /boot/firmware/cmdline.txt and reboot."
+    echo "    ./setup.sh moves the console off it (cmdline.txt on a Pi, orangepiEnv.txt"
+    echo "    on an Orange Pi), then reboot."
 else
     echo "    /dev/ttyS0 free"
 fi
@@ -113,7 +114,13 @@ UNIT
 fi
 
 echo
-echo "==> next: provision the radio once (it stores settings permanently)"
-echo "    sudo systemctl stop whisplay-daemon"
-echo "    python3 provision_radio.py --address 5 --frequency 868"
-echo "    sudo systemctl start whisplay-daemon"
+if cat /proc/device-tree/model 2>/dev/null | tr -d '\0' | grep -qi 'orange *pi'; then
+    # provision_radio.py drives M0/M1 through RPi.GPIO, which is Pi-only.
+    echo "==> next: provision the radio once, on a Raspberry Pi -- it cannot be"
+    echo "    done from an Orange Pi yet. The settings stay in the module."
+else
+    echo "==> next: provision the radio once (it stores settings permanently)"
+    echo "    sudo systemctl stop whisplay-daemon"
+    echo "    python3 provision_radio.py --frequency 868"
+    echo "    sudo systemctl start whisplay-daemon"
+fi

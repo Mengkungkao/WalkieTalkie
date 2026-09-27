@@ -9,6 +9,7 @@ access to the M0/M1 mode pins.
 from __future__ import annotations
 
 import os
+import socket
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -23,7 +24,9 @@ ENV_PREFIX = "WALKIE_"
 @dataclass
 class RadioSettings:
     port: str = "/dev/ttyS0"
-    address: int = 5
+    # This radio's Device ID. None ("auto" in config.yaml) means pick an
+    # unused one on first start and keep it; see overrides.apply.
+    address: int | None = None
     frequency_mhz: int = 868
     air_speed: int = 9600
     power_dbm: int = 22
@@ -45,7 +48,9 @@ class RadioSettings:
 
 @dataclass
 class IdentitySettings:
-    callsign: str = "whisplay"
+    # "auto" is the hostname, which is usually already unique per device
+    # and is what the operator calls the machine anyway.
+    callsign: str = "auto"
 
 
 @dataclass
@@ -128,6 +133,33 @@ def _coerce(target, values: dict):
         setattr(target, key, value)
 
 
+def _auto(value) -> bool:
+    return value is None or (isinstance(value, str)
+                             and value.strip().lower() in ("", "auto"))
+
+
+def _normalise_identity(settings: Settings):
+    """Turn config.yaml's "auto" and stray strings into real values."""
+    address = settings.radio.address
+    if _auto(address):
+        settings.radio.address = None
+    else:
+        try:
+            address = int(address)
+        except (TypeError, ValueError):
+            address = -1
+        if not 0 <= address <= 0xFFFE:
+            log.warning("radio.address %r is not 0-65534; picking one instead",
+                        settings.radio.address)
+            address = None
+        settings.radio.address = address
+
+
+def hostname_callsign() -> str:
+    name = socket.gethostname().split(".")[0].strip()
+    return name[:16] or "radio"
+
+
 def _apply_env(settings: Settings):
     """WALKIE_RADIO_PORT, WALKIE_IDENTITY_CALLSIGN, ... override the file."""
     sections = {
@@ -189,9 +221,11 @@ def load(path: str | None = None) -> Settings:
         for entry in (raw.get("contacts") or [])
         if isinstance(entry, dict) and entry.get("address") is not None
     ]
+    _normalise_identity(settings)
 
     # Device-set values sit above config.yaml but below the environment,
-    # so a one-off WALKIE_* override still wins for debugging.
+    # so a one-off WALKIE_* override still wins for debugging. This is
+    # also where a fresh install is given its Device ID, and saves it.
     try:
         from app.store.overrides import Overrides, apply as apply_overrides
 
@@ -199,7 +233,16 @@ def load(path: str | None = None) -> Settings:
     except Exception:
         log.warning("could not apply saved device settings", exc_info=True)
 
+    if settings.radio.address is None:
+        # Only if the settings file could not be written: still run, on an
+        # ID that will not survive a restart.
+        import random
+
+        settings.radio.address = random.randint(1, 0xFFFE)
+        log.warning("using temporary Device ID %d", settings.radio.address)
     _apply_env(settings)
+    if _auto(settings.identity.callsign):
+        settings.identity.callsign = hostname_callsign()
 
     clashing = [c.name for c in settings.contacts
                 if c.address == settings.radio.address]

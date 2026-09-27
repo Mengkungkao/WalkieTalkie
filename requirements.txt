@@ -1,8 +1,9 @@
 # Runtime dependencies.
 #
 # libcodec2 is NOT here: it is a system shared object, bound with ctypes.
-#   sudo apt install libcodec2-1.2
-# RPi.GPIO is only needed if radio.mode_pins is set (rewired M0/M1).
+#   sudo apt install libcodec2-1.2   (libcodec2-1.0 on Debian 12 / Ubuntu 22.04)
+# RPi.GPIO is only needed if radio.mode_pins is set (rewired M0/M1), and
+# for provision_radio.py. It only runs on a Raspberry Pi.
 pyserial>=3.5
 PyYAML>=6.0
 Pillow>=9.0

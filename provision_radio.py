@@ -2,6 +2,9 @@
 """One-shot: write the LoRa module's persistent configuration.
 
 Run this once per radio, before the app is used, and then not again.
+Every module gets the same frequency and air rate. The address written
+here no longer matters: the app addresses packets itself (protocol v2),
+and each radio's Device ID is set in the app, by pairing or in Settings.
 
 **Why it is separate from the app.** Setting the module's frequency,
 address and air rate requires driving M0/M1 -- GPIO 22 and 27 -- into
@@ -23,6 +26,10 @@ writes the settings, reads them back, and restarts the daemon:
 
 Use --check on its own to read back what a module currently holds
 without changing anything.
+
+Raspberry Pi only, for now: the mode pins are driven through RPi.GPIO.
+On an Orange Pi, provision the HAT on a Pi and move it across -- the
+settings live in the module.
 """
 
 from __future__ import annotations
@@ -63,12 +70,27 @@ def gpio_conflict(pins=DEFAULT_MODE_PINS) -> str | None:
     return None
 
 
+def mode_pin_driver_missing() -> str | None:
+    """Why M0/M1 cannot be driven on this board, or None if they can.
+
+    Checked up front because the failure otherwise surfaces from inside
+    SX126x as "cannot open /dev/ttyS0: No module named 'RPi'", followed
+    by UART advice -- which sends an Orange Pi user after the wrong thing.
+    """
+    try:
+        import RPi.GPIO  # noqa: F401 -- RuntimeError on a non-Pi board
+    except (ImportError, RuntimeError) as exc:
+        return str(exc)
+    return None
+
+
 def main() -> int:
     defaults = settings_module.load().radio
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--port", default=defaults.port)
     parser.add_argument("--address", type=int, default=defaults.address,
-                        help="0-65534; must be unique on the channel")
+                        help="the module's own address, 0-65534; since protocol "
+                             "v2 the app ignores it, so any value works")
     parser.add_argument("--frequency", type=int, default=defaults.frequency_mhz,
                         help="MHz, 850-930 or 410-493")
     parser.add_argument("--air-speed", type=int, default=defaults.air_speed,
@@ -89,7 +111,17 @@ def main() -> int:
                         help="proceed even if the mode pins look busy")
     args = parser.parse_args()
 
-    moved = tuple(defaults.mode_pins or ()) not in ((), tuple(DEFAULT_MODE_PINS))
+    missing = mode_pin_driver_missing()
+    if missing:
+        print(f"! cannot drive M0/M1 on this board ({missing}).", file=sys.stderr)
+        print("  Provisioning needs RPi.GPIO, which only runs on a Raspberry Pi.",
+              file=sys.stderr)
+        print("  Provision this LoRa HAT on a Pi; the settings are stored in the",
+              file=sys.stderr)
+        print("  module and move with it.", file=sys.stderr)
+        return 2
+
+    moved =tuple(defaults.mode_pins or ()) not in ((), tuple(DEFAULT_MODE_PINS))
     if moved:
         print(f"using mode pins from config.yaml: M0=GPIO{args.m0} M1=GPIO{args.m1}")
 

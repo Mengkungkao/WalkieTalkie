@@ -24,8 +24,10 @@ log = get_logger("audio-dev")
 
 _CARD_LINE = re.compile(r"^card (\d+): (\S+)")
 
-# Cards that exist but are useless for a walkie-talkie.
-_IGNORED = ("vc4hdmi", "vc4-hdmi", "Loopback")
+# Cards that exist but are useless for a walkie-talkie. "hdmi" covers the
+# Pi's vc4hdmi and the Orange Pi's ahubhdmi -- which even lists itself as
+# a capture device, so without this it would be chosen as the microphone.
+_IGNORED = ("hdmi", "Loopback")
 
 
 def _list_cards(command: str) -> list:

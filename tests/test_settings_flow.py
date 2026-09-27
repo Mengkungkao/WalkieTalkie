@@ -87,7 +87,7 @@ def play(app, *gestures):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["device_id", "base", "add", "clock", "reset"]
+    assert keys == ["pair", "device_id", "base", "add", "clock", "reset"]
     assert app.state.screen == SETTINGS
 
 
@@ -97,8 +97,11 @@ def test_opening_a_setting_enters_an_editor(app):
 
 
 def test_every_settings_row_opens_without_error(app):
+    """Every row but Pair device, which opens a screen (see test_pairing)."""
     app._open_settings()
-    for index in range(len(app.state.settings_items)):
+    for index, item in enumerate(app.state.settings_items):
+        if item["key"] == "pair":
+            continue
         app.state.settings_index = index
         app._open_setting()
         assert app.state.screen == EDIT

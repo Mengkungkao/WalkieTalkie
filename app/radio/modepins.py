@@ -35,6 +35,7 @@ from app.utils.logger import get_logger
 log = get_logger("modepins")
 
 GPIOMEM = "/dev/gpiomem"
+DEVICE_TREE_COMPATIBLE = "/proc/device-tree/compatible"
 GPLEV0 = 0x34
 DEFAULT_M0 = 22
 DEFAULT_M1 = 27
@@ -69,8 +70,24 @@ MODES = {
 }
 
 
+def _broadcom_soc() -> bool:
+    """Is /dev/gpiomem the BCM2835-style register block `_read` assumes?
+
+    Only a Raspberry Pi's is. On anything else -- an Orange Pi's H618 --
+    these offsets would read unrelated registers and could report a deaf
+    radio that is fine, so the pins are treated as unreadable instead.
+    """
+    try:
+        with open(DEVICE_TREE_COMPATIBLE, "rb") as handle:
+            return b"brcm,bcm2" in handle.read()
+    except OSError:
+        return False
+
+
 def _read(m0: int, m1: int):
     """(level_m0, level_m1, func_m0, func_m1), or None if unreadable."""
+    if not _broadcom_soc():
+        return None
     try:
         fd = os.open(GPIOMEM, os.O_RDONLY | os.O_SYNC)
     except OSError:

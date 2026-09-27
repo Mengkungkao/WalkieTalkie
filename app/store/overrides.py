@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import tempfile
 
 from app.utils.logger import get_logger
@@ -101,6 +102,38 @@ class Overrides:
         self.save()
         return True
 
+    # --- identity -------------------------------------------------------
+    def assign_address(self, avoid=()) -> int:
+        """Pick an unused Device ID for this radio, and keep it.
+
+        Random rather than a shared default: every radio used to ship as
+        address 5, and two radios on one address cannot talk -- each
+        drops the other's packets as its own echo. With a handful of
+        radios, a random pick out of 65534 almost never collides, and
+        pairing detects and fixes it when it does.
+        """
+        avoid = set(avoid) | {0, 0xFFFF}
+        picker = random.SystemRandom()
+        address = picker.randint(1, 0xFFFE)
+        while address in avoid:
+            address = picker.randint(1, 0xFFFE)
+        self.set("radio", "address", address)
+        return address
+
+    @property
+    def node_token(self) -> bytes:
+        """This installation's random token; see protocol.TOKEN_SIZE."""
+        token = self.data.get("node_token")
+        try:
+            value = bytes.fromhex(token) if isinstance(token, str) else b""
+        except ValueError:
+            value = b""
+        if len(value) != 4:
+            value = os.urandom(4)
+            self.data["node_token"] = value.hex()
+            self.save()
+        return value
+
     # --- base station ---------------------------------------------------
     @property
     def base_address(self):
@@ -151,6 +184,9 @@ def apply(settings, overrides: "Overrides"):
     address = overrides.get("radio", "address")
     if address is not None:
         settings.radio.address = int(address)
+    elif settings.radio.address is None:
+        settings.radio.address = overrides.assign_address(
+            c.address for c in settings.contacts)
     callsign = overrides.get("identity", "callsign")
     if callsign:
         settings.identity.callsign = str(callsign)

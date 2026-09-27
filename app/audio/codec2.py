@@ -10,9 +10,10 @@ of magnitude here.
 
 ctypes rather than the `pycodec2` wheel or the `c2enc` CLI: the wheel
 needs a compiler and headers on the Pi, and spawning a process per clip
-costs more wall time and power than the encode itself. `libcodec2.so.1.2`
-already ships in Debian's `libcodec2-1.2`, which is installed, so this
-binds the shared object as-is with no build step and no `-dev` package.
+costs more wall time and power than the encode itself. libcodec2 already
+ships as a system package -- `libcodec2-1.2`, or `libcodec2-1.0` on Debian
+12 and Ubuntu 22.04 -- so this binds the shared object as-is with no build
+step and no `-dev` package.
 """
 
 from __future__ import annotations

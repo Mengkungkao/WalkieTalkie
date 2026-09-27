@@ -13,9 +13,12 @@ import pytest
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
 from app.ui import navigation as nav
-from app.ui.screens import CONTACTS, EDIT, INBOX, SETTINGS, STATUS, TALK
+from app.ui.screens import CONTACTS, EDIT, INBOX, PAIR, SETTINGS, STATUS, TALK
 
-ALL_SCREENS = (CONTACTS, TALK, INBOX, STATUS, SETTINGS)
+# Reachable by gesture alone. Pairing is opened from a Settings row, so it
+# is checked separately.
+MAIN_SCREENS = (CONTACTS, TALK, INBOX, STATUS, SETTINGS)
+ALL_SCREENS = MAIN_SCREENS + (PAIR,)
 CLICKS = (SINGLE, DOUBLE, TRIPLE)
 
 
@@ -28,7 +31,8 @@ def test_two_clicks_leaves_a_view(screen):
 @pytest.mark.parametrize("screen", nav.MENU_SCREENS)
 def test_two_clicks_opens_a_row_in_a_menu(screen):
     """Menus are lists you pick from, so two clicks goes in, not out."""
-    assert nav.route(screen, DOUBLE) in (nav.OPEN_TALK, nav.OPEN_SETTING)
+    assert nav.route(screen, DOUBLE) in (nav.OPEN_TALK, nav.OPEN_SETTING,
+                                         nav.PAIR_SELECTED)
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -105,7 +109,11 @@ def test_navigation_reaches_every_screen():
             if destination and destination not in reachable:
                 reachable.add(destination)
                 frontier.append(destination)
-    assert reachable == set(ALL_SCREENS)
+    assert reachable == set(MAIN_SCREENS)
+
+
+def test_three_clicks_leaves_pairing_for_settings():
+    assert nav.route(PAIR, TRIPLE) == nav.BACK_SETTINGS
 
 
 def test_an_open_editor_owns_every_click_but_exit():
