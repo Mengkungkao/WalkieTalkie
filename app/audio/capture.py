@@ -38,13 +38,16 @@ import threading
 import time
 from collections import deque
 
-from app.audio.codec2 import SAMPLE_RATE
+from app.audio import dsp
 from app.utils.logger import get_logger
 
 log = get_logger("capture")
 
-BYTES_PER_SECOND = SAMPLE_RATE * 2  # 16-bit mono
-CHUNK = 1024                        # ~64 ms per pipe read
+# The card is opened at its own rate and the audio converted here, with a
+# proper filter; see app.audio.dsp for why, and what it measured.
+CAPTURE_RATE = dsp.HARDWARE_RATE
+BYTES_PER_SECOND = CAPTURE_RATE * 2  # 16-bit mono
+CHUNK = 6144                         # ~64 ms per pipe read
 
 # How much audio from before the hold threshold to keep. The threshold is
 # 350 ms, so this covers a user who speaks the instant they press.
@@ -73,6 +76,20 @@ def _rms(pcm: bytes) -> float:
     return min(1.0, ((total / count) ** 0.5 / 32768.0) * 4.0)
 
 
+# More than this share of samples at full scale is audible distortion.
+CLIPPED_TOO_MUCH = 0.001
+
+
+def _peak_and_clipping(pcm: bytes) -> tuple:
+    """(peak in dBFS, share of samples within 1% of full scale)."""
+    if _np is None or len(pcm) < 2:
+        return -120.0, 0.0
+    samples = _np.abs(_np.frombuffer(pcm[: len(pcm) & ~1], dtype="<i2").astype("i4"))
+    peak = int(samples.max()) if samples.size else 0
+    clipped = float((samples >= 32440).mean()) if samples.size else 0.0
+    return (20 * _np.log10(peak / 32768) if peak else -120.0), clipped
+
+
 class Recorder:
     """Captures 8 kHz mono PCM, with the codec kept warm while armed."""
 
@@ -83,6 +100,10 @@ class Recorder:
         self.preroll_bytes = int(preroll_seconds * BYTES_PER_SECOND)
         self.level = 0.0
         self.started_at = 0.0
+        # Of the last recording: the share of samples at full scale. Clipped
+        # audio is distorted before anything here can help, and levelling
+        # afterwards only makes the distortion louder.
+        self.last_clipped = 0.0
 
         self._process = None
         self._thread = None
@@ -136,7 +157,7 @@ class Recorder:
     def _spawn(self) -> bool:
         command = [
             "arecord", "-q", "-D", self.device, "-t", "raw",
-            "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", "1",
+            "-f", "S16_LE", "-r", str(CAPTURE_RATE), "-c", "1",
         ]
         try:
             self._process = subprocess.Popen(
@@ -226,7 +247,7 @@ class Recorder:
         return True
 
     def stop(self) -> bytes:
-        """Stop keeping audio and return everything captured."""
+        """Stop keeping audio and return it as 8 kHz speech, ready to encode."""
         if not self._recording:
             return b""
         with self._lock:
@@ -241,10 +262,16 @@ class Recorder:
             self._teardown()
 
         preroll = min(self.preroll_bytes, len(pcm))
-        log.info("recorded %.2fs (%d B PCM, %.0f ms of it pre-roll)",
-                 len(pcm) / BYTES_PER_SECOND, len(pcm),
-                 preroll / BYTES_PER_SECOND * 1000)
-        return pcm
+        peak_db, self.last_clipped = _peak_and_clipping(pcm)
+        log.info("recorded %.2fs (%d B PCM, %.0f ms of it pre-roll), peak %.1f dBFS, "
+                 "%.2f%% clipped", len(pcm) / BYTES_PER_SECOND, len(pcm),
+                 preroll / BYTES_PER_SECOND * 1000, peak_db, self.last_clipped * 100)
+        if self.last_clipped > CLIPPED_TOO_MUCH:
+            log.warning("the microphone clipped on %.1f%% of that recording: it is "
+                        "overdriven, and will sound distorted however it is sent. "
+                        "Lower audio.mic_level, or speak further from the radio.",
+                        self.last_clipped * 100)
+        return dsp.prepare_speech(dsp.downsample(pcm))
 
     def cancel(self):
         self.stop()

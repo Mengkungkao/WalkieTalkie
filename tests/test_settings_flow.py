@@ -87,7 +87,7 @@ def play(app, *gestures):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["name", "device_id", "channel", "base", "clock", "reset"]
+    assert keys == ["name", "device_id", "channel", "voice", "base", "clock", "reset"]
     assert app.state.screen == SETTINGS
 
 
@@ -226,3 +226,26 @@ def test_the_editor_screen_is_not_in_the_navigation_table(app):
     """Editors route their own gestures; the table must not steal them."""
     for gesture in (SINGLE, DOUBLE, TRIPLE):
         assert nav.route(EDIT, gesture) is None
+
+
+# --- voice quality -------------------------------------------------------
+def test_voice_quality_starts_on_the_current_mode(app):
+    app.settings.audio.codec_mode = "1600"
+    open_setting(app, "voice")
+    assert app.state.editor.value == "1600"
+
+
+def test_choosing_a_voice_quality_switches_the_codec_and_persists(app, tmp_path):
+    from app.audio.codec2 import MODE_BY_NAME, available
+
+    if not available():
+        pytest.skip("libcodec2 not installed")
+    app.codec = None
+    app.settings.audio.codec_mode = "3200"
+    open_setting(app, "voice")
+    play(app, SINGLE, DOUBLE)                    # Clear -> Balanced, save
+    assert app.settings.audio.codec_mode == "1600"
+    assert app.codec_mode == MODE_BY_NAME["1600"]
+    assert app.codec.mode == MODE_BY_NAME["1600"]
+    assert app.state.codec_name == "1600"
+    assert Overrides(tmp_path).get("audio", "codec_mode") == "1600"

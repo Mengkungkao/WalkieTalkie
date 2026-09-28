@@ -137,3 +137,60 @@ def test_no_audio_device_means_no_crash():
     assert rec.arm() is False
     assert rec.start() is False
     assert rec.stop() == b""
+
+
+def test_the_card_is_opened_at_48k_and_speech_comes_back_at_8k(recorder, monkeypatch):
+    """The card's own rate in, Codec2's rate out: converted here, filtered."""
+    from app.audio import dsp
+
+    commands = []
+    real = FakeArecord.__init__
+
+    def spy(self, command, *args, **kwargs):
+        commands.append(command)
+        real(self, command, *args, **kwargs)
+
+    monkeypatch.setattr(FakeArecord, "__init__", spy)
+    recorder.arm()
+    recorder.start()
+    time.sleep(0.2)
+    kept = recorder._captured_bytes
+    pcm = recorder.stop()
+    assert commands[0][commands[0].index("-r") + 1] == str(dsp.HARDWARE_RATE)
+    assert len(pcm) == (kept // 2 // dsp.FACTOR) * 2
+
+
+def test_playback_goes_to_the_card_at_48k(monkeypatch):
+    """Decoded speech and cues are 8 kHz; the card hears 48 kHz."""
+    from app.audio import dsp, playback
+
+    sent = {}
+
+    class FakeAplay:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            sent["command"] = command
+
+        def communicate(self, data, timeout=None):
+            sent["data"] = data
+
+    monkeypatch.setattr(subprocess, "Popen", FakeAplay)
+    monkeypatch.setattr(playback.shutil, "which", lambda _name: "/usr/bin/aplay")
+    player = playback.Player("plughw:1")
+    assert player.play(bytes(1600)) is True           # 100 ms at 8 kHz
+    assert sent["command"][sent["command"].index("-r") + 1] == str(dsp.HARDWARE_RATE)
+    assert len(sent["data"]) == 1600 * dsp.FACTOR
+
+
+def test_clipping_is_measured():
+    """Distortion at the microphone is logged: nothing later can undo it."""
+    from app.audio.capture import _peak_and_clipping
+
+    clean = struct.pack("<h", 16000) * 1000 + struct.pack("<h", -16000) * 1000
+    peak, clipped = _peak_and_clipping(clean)
+    assert round(peak) == -6 and clipped == 0.0
+
+    overdriven = struct.pack("<h", 32767) * 100 + struct.pack("<h", 1000) * 900
+    _peak, clipped = _peak_and_clipping(overdriven)
+    assert clipped == pytest.approx(0.1)

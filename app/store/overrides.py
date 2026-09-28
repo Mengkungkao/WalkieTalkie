@@ -35,6 +35,7 @@ FILE_NAME = "settings.json"
 ALLOWED = {
     "radio": {"address", "privacy_channel"},
     "identity": {"callsign"},
+    "audio": {"codec_mode"},
 }
 
 
@@ -203,6 +204,9 @@ def apply(settings, overrides: "Overrides"):
     callsign = overrides.get("identity", "callsign")
     if callsign:
         settings.identity.callsign = str(callsign)
+    codec_mode = overrides.get("audio", "codec_mode")
+    if codec_mode:
+        settings.audio.codec_mode = str(codec_mode)
 
     known = {c.address for c in settings.contacts}
     for entry in overrides.contacts:

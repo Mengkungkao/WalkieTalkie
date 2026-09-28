@@ -49,7 +49,7 @@ echo "==> installing dependencies"
 ssh "${SSH_OPTS[@]}" "$TARGET" "bash -s" <<REMOTE
 set -euo pipefail
 cd "${REMOTE_DIR}"
-chmod +x run.sh install.sh setup.sh setup/*.sh provision_radio.py 2>/dev/null || true
+chmod +x run.sh install.sh setup.sh install-*.sh provision_radio.py 2>/dev/null || true
 
 missing=""
 for pkg in serial yaml PIL numpy cryptography; do

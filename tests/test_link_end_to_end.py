@@ -132,6 +132,8 @@ def test_a_node_ignores_its_own_transmissions(monkeypatch):
 
 
 def test_a_dropped_fragment_degrades_into_a_gap_not_a_crash(monkeypatch):
+    """When the sender cannot fill it in, the gap keeps its place."""
+    monkeypatch.setattr(protocol, "QUIET_SECONDS", 0.3)
     _left, right = FakeModule.pair()
     lossy = LossyModule("lossy", addr=1, drop_indices={1})  # lose packet 2
     lossy.peers = [right]
@@ -139,21 +141,24 @@ def test_a_dropped_fragment_degrades_into_a_gap_not_a_crash(monkeypatch):
 
     alice = LoraLink(make_radio(lossy, 1, monkeypatch), duty_cycle_percent=100.0)
     bob = LoraLink(make_radio(right, 2, monkeypatch), duty_cycle_percent=100.0)
-    bob._reassembler = protocol.Reassembler(timeout=3.0)
+    alice._remember = lambda *_args: None      # nothing kept to resend from
     inbox = Collector()
     bob.on_message(inbox)
     alice.start()
     bob.start()
     try:
-        alice.send_voice(protocol.BROADCAST, b"v" * 600, codec_mode=8)
-        deadline = time.monotonic() + 8
-        while not inbox.messages and time.monotonic() < deadline:
-            bob.tick()
-            time.sleep(0.2)
-        assert inbox.messages, "an incomplete message must still be delivered"
-        message, _ = inbox.messages[0]
+        voice = bytes(range(200)) * 3            # 600 B: four fragments
+        alice.send_voice(protocol.BROADCAST, voice, codec_mode=8)
+        messages = inbox.wait(timeout=15.0)
+        assert messages, "an incomplete message must still be delivered"
+        message, _ = messages[0]
         assert not message.complete
         assert message.missing == [1]
+        size = protocol.VOICE_CHUNK
+        assert message.fragment_size == size
+        assert len(message.body) == len(voice)
+        assert message.body[size:2 * size] == bytes(size)      # the gap
+        assert message.body[2 * size:] == voice[2 * size:]    # still in place
     finally:
         alice.stop()
         bob.stop()

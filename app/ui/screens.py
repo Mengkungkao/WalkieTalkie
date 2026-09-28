@@ -120,6 +120,7 @@ class ViewState:
     pair_found: list = field(default_factory=list)
     pair_index: int = 0
     pair_status: str = ""
+    pair_channels: dict = field(default_factory=dict)
 
     link_states: dict = field(default_factory=dict)
     target_linked: bool = False
@@ -612,7 +613,7 @@ def draw_pair(draw, state: ViewState):
     draw_header(draw, state, "PAIR")
     width = theme.SCREEN_WIDTH - 2 * MARGIN
     small, status_font = theme.font(11), theme.font(12, "bold")
-    me = f"this radio: {state.callsign or '?'} · ID {state.address}"
+    me = f"this radio: {state.callsign or '?'} · ID {state.address} · ch {state.channel}"
     centred(draw, CONTENT_TOP, ellipsise(draw, me, small, width), small,
             theme.TEXT_DIM)
     status = state.pair_status or "looking for radios"
@@ -647,6 +648,9 @@ def draw_pair(draw, state: ViewState):
                   ellipsise(draw, name, name_font, text_width), font=name_font,
                   fill=theme.TEXT if chosen else theme.TEXT_DIM)
         detail = [f"ID {addr}"]
+        channel = state.pair_channels.get(addr)
+        if channel is not None and channel != state.channel:
+            detail.append(f"ch {channel}")
         if rssi is not None:
             detail.append(theme.SIGNAL_LABELS[theme.signal_level(rssi)])
         if known:

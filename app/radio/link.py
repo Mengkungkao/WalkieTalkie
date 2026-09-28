@@ -27,6 +27,13 @@ firing a six-fragment voice message at it back-to-back overruns that
 buffer and the tail is silently dropped. So each fragment is followed by
 a sleep of its own estimated airtime plus a guard, which is also where
 the duty-cycle budget is charged and, when exhausted, waited out.
+
+A third thread, **reassembly**, sleeps until a half-received message
+needs attention. At the edge of range fragments go missing; rather than
+play noise, or wait forever for a last fragment that is never coming,
+it asks the sender for the missing ones (`protocol.REPAIR`) -- the
+sender keeps each message for a minute to answer -- and then delivers
+what it has, with the gaps kept in place for the player to silence.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from __future__ import annotations
 import itertools
 import os
 import queue
+import random
 import threading
 import time
 from collections import deque
@@ -56,6 +64,14 @@ PRESENCE_TIMEOUT = 15 * 60
 # Sealed fragments remembered, so one recorded off the air and sent again
 # is dropped rather than played twice. A few minutes of busy traffic.
 REPLAY_MEMORY = 1024
+
+# How long a sent message is kept to answer requests for missing pieces,
+# and how often any one fragment may be sent again.
+KEEP_SENT_SECONDS = 60.0
+MAX_RESENDS = 2
+# Two radios asking for the same broadcast fragment inside this window get
+# one resend between them.
+RESEND_GAP = 1.5
 
 
 class NotPaired(Exception):
@@ -118,6 +134,10 @@ class Stats:
     no_key: int = 0
     failed_to_open: int = 0
     replays: int = 0
+    config_mode_replies: int = 0
+    repairs_asked: int = 0
+    fragments_resent: int = 0
+    delivered_with_gaps: int = 0
     last_rssi: int | None = None
     airtime_used: float = 0.0
     queue_depth: int = 0
@@ -137,6 +157,7 @@ class LoraLink:
         self.token = token or os.urandom(protocol.TOKEN_SIZE)
         self.keyring = keyring
         self.channel = channel
+        self._ff_run = 0
         self._seen = deque(maxlen=REPLAY_MEMORY)
         self._seen_set = set()
         self.budget = AirtimeBudget(air_speed, duty_cycle_percent)
@@ -144,8 +165,17 @@ class LoraLink:
         self.peers: dict = {}
 
         self._deframer = Deframer()
-        self._reassembler = protocol.Reassembler()
-        self._msg_ids = itertools.cycle(range(256))
+        # One full fragment on the air, plus the pause the sender leaves.
+        full_frame = len(encode_frame(bytes(protocol.HEADER_SIZE + protocol.MAX_BODY)))
+        self._reassembler = protocol.Reassembler(
+            fragment_seconds=self.budget.estimate(full_frame) + PACING_GUARD)
+        self._reassembly = threading.Condition()
+        # msg_id -> [sent_at, dst, packets, {seq: (resends, last_at)}]
+        self._sent = {}
+        # From a random start, so a radio that restarts does not reuse the
+        # numbers its last session's messages still hold on other radios.
+        start = random.randrange(256)
+        self._msg_ids = itertools.cycle([(start + i) % 256 for i in range(256)])
         self._tx = queue.Queue()
         self._threads = []
         self._running = threading.Event()
@@ -196,7 +226,8 @@ class LoraLink:
         if self._running.is_set():
             return
         self._running.set()
-        for name, target in (("lora-rx", self._rx_loop), ("lora-tx", self._tx_loop)):
+        for name, target in (("lora-rx", self._rx_loop), ("lora-tx", self._tx_loop),
+                             ("lora-reassembly", self._reassembly_loop)):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
             self._threads.append(thread)
@@ -206,6 +237,8 @@ class LoraLink:
         self._running.clear()
         self._tx.put(None)          # unblock the tx thread
         self.radio.wake_reader()    # unblock the rx thread
+        with self._reassembly:
+            self._reassembly.notify_all()
         for thread in self._threads:
             thread.join(timeout=1.5)
         self._threads = []
@@ -219,6 +252,7 @@ class LoraLink:
                     time.sleep(0.2)  # port hiccup: back off rather than spin
                 continue
             self.stats.bytes_rx += len(data)
+            self._watch_for_config_mode(data)
             for payload, rssi_byte in self._deframer.feed(data):
                 self._handle_payload(payload, rssi_byte)
             self.stats.frames_dropped = self._deframer.frames_bad
@@ -229,13 +263,36 @@ class LoraLink:
             if self._deframer.last_rssi_byte is not None:
                 self.stats.last_rssi = -(256 - self._deframer.last_rssi_byte)
 
+    def _watch_for_config_mode(self, data: bytes):
+        """Count FF FF FF: what a module in configuration mode says.
+
+        With M1 high the module takes every write as a malformed setting
+        and answers FF FF FF instead of transmitting it -- the only sign,
+        from this side of the UART, that nothing is going on the air and
+        nothing will be heard. On the Whisplay stack M1 is the LCD's DC
+        line, which the stock driver leaves high after drawing.
+        """
+        for byte in data:
+            # Replies arrive back to back, with nothing between them, so a
+            # run of FFs is counted in threes rather than once.
+            self._ff_run = self._ff_run + 1 if byte == 0xFF else 0
+            if self._ff_run and self._ff_run % 3 == 0:
+                self.stats.config_mode_replies += 1
+                if self.stats.config_mode_replies == 3:
+                    log.error(
+                        "the radio module is in configuration mode (it answers "
+                        "FF FF FF to what we send): nothing goes on the air and "
+                        "nothing is heard. M1 is held high -- on the Whisplay HAT "
+                        "that is the LCD's DC line; apply docs/whisplay-dc-fix.patch "
+                        "(the installer does) and restart whisplay-daemon")
+
     def _handle_payload(self, payload: bytes, rssi_byte):
         rssi = -(256 - rssi_byte) if rssi_byte is not None else None
         packet = protocol.decode(payload, rssi_dbm=rssi)
         if packet is None:
             self.stats.frames_dropped += 1
             return
-        if packet.channel != self.channel:
+        if packet.channel != self.channel and packet.type not in protocol.PAIRING_TYPES:
             # Somebody else's conversation on the same frequency.
             self.stats.other_channel += 1
             return
@@ -275,7 +332,9 @@ class LoraLink:
             self.stats.last_rssi = rssi
         peer = self._touch_peer(packet.src, rssi)
 
-        message = self._reassembler.push(packet)
+        with self._reassembly:
+            message = self._reassembler.push(packet)
+            self._reassembly.notify_all()   # a new or moved deadline
         if message is not None:
             self._deliver(message, peer)
 
@@ -330,8 +389,13 @@ class LoraLink:
                 log.exception("clash handler failed")
 
     def _deliver(self, message, peer: Peer):
+        if message.type == protocol.REPAIR:
+            self._resend(message)          # plumbing, not for the app
+            return
         self.stats.messages_rx += 1
         peer.messages += 1
+        if message.missing:
+            self.stats.delivered_with_gaps += 1
 
         if message.type in (protocol.HELLO, protocol.HELLO_ACK):
             name = message.body.decode("utf-8", "replace").strip()[:20]
@@ -409,11 +473,86 @@ class LoraLink:
         return peer.link_state if peer else protocol.LINK_UNLINKED
 
     def tick(self):
-        """Flush partial messages whose sender went quiet. Cheap; call rarely."""
-        for message in self._reassembler.expire():
+        """Attend to half-received messages now. The reassembly thread does
+        this by itself; calling it as well is harmless."""
+        self._service_partials()
+
+    # --- missing fragments ---------------------------------------------
+    def _reassembly_loop(self):
+        while self._running.is_set():
+            with self._reassembly:
+                deadline = self._reassembler.next_deadline()
+                wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+                # No partials: sleep until a fragment arrives, at no cost.
+                self._reassembly.wait(wait)
+            if self._running.is_set():
+                self._service_partials()
+
+    def _service_partials(self):
+        asks, finished = [], []
+        now = time.monotonic()
+        with self._reassembly:
+            for key, partial in self._reassembler.due(now):
+                src, msg_id, _type = key
+                too_old = now - partial.last_seen >= self._reassembler.timeout
+                if (partial.repairs < protocol.REPAIR_ROUNDS and not too_old
+                        and self.can_send(src, protocol.REPAIR)):
+                    missing = partial.missing
+                    wait = (protocol.REPAIR_WAIT
+                            + protocol.REPAIR_WAIT_PER_FRAGMENT * len(missing))
+                    self._reassembler.postpone(key, wait)
+                    asks.append((src, msg_id, missing))
+                else:
+                    finished.append(self._reassembler.finish(key))
+        for src, msg_id, missing in asks:
+            log.info("asking %d for %d missing fragment(s) of message %d: %s",
+                     src, len(missing), msg_id, missing)
+            self.stats.repairs_asked += 1
+            _id, packets = self._fragments(
+                protocol.REPAIR, src, bytes([msg_id]) + bytes(missing[:protocol.MAX_BODY - 64]))
+            self._enqueue(src, packets, f"repair-ask/{msg_id}", report=False)
+        for message in finished:
+            if message is None:
+                continue
             peer = self._touch_peer(message.src, message.rssi_dbm)
-            log.info("flushing incomplete %s from %d", message.type_name, message.src)
+            log.info("delivering %s from %d with %d fragment(s) missing: %s",
+                     message.type_name, message.src, len(message.missing), message.missing)
             self._deliver(message, peer)
+
+    def _remember(self, msg_id: int, dst: int, packets: list):
+        now = time.monotonic()
+        for old in [m for m, entry in self._sent.items()
+                    if now - entry[0] > KEEP_SENT_SECONDS]:
+            del self._sent[old]
+        if len(packets) > 1:
+            self._sent[msg_id] = [now, dst, packets, {}]
+
+    def _resend(self, message):
+        """Someone asked for fragments of a message of ours again."""
+        if not message.body:
+            return
+        msg_id, wanted = message.body[0], message.body[1:]
+        entry = self._sent.get(msg_id)
+        now = time.monotonic()
+        if entry is None or now - entry[0] > KEEP_SENT_SECONDS:
+            return
+        _at, dst, packets, counts = entry
+        if dst not in (message.src, protocol.BROADCAST):
+            return  # not a message they were meant to have
+        again = []
+        for seq in sorted(set(wanted)):
+            if seq >= len(packets):
+                continue
+            resends, last = counts.get(seq, (0, -RESEND_GAP))
+            if resends >= MAX_RESENDS or now - last < RESEND_GAP:
+                continue
+            counts[seq] = (resends + 1, now)
+            again.append(packets[seq])
+        if again:
+            self.stats.fragments_resent += len(again)
+            log.info("resending %d fragment(s) of message %d for %d",
+                     len(again), msg_id, message.src)
+            self._enqueue(dst, again, f"resend/{msg_id}", report=False)
 
     def _touch_peer(self, addr: int, rssi) -> Peer:
         with self._peers_lock:
@@ -452,10 +591,10 @@ class LoraLink:
         return True
 
     def plan(self, dst: int, size: int) -> tuple:
-        """(fragments, bytes on the air) for a `size`-byte message to `dst`."""
+        """(fragments, bytes on the air) for a `size`-byte voice message."""
         sealing, _key = self._sealing(protocol.VOICE, dst)
         overhead = crypto.OVERHEAD if sealing != protocol.CLEAR else 0
-        per_fragment = protocol.MAX_BODY - overhead
+        per_fragment = min(protocol.MAX_BODY - overhead, protocol.VOICE_CHUNK)
         fragments = max(1, -(-size // per_fragment))
         framing = len(encode_frame(b"")) + protocol.HEADER_SIZE + overhead
         return fragments, size + fragments * framing
@@ -468,7 +607,10 @@ class LoraLink:
             channel=self.channel, sealing=sealing,
             seal=(lambda header, chunk: crypto.seal(key, header, chunk)) if key else None,
             overhead=crypto.OVERHEAD if key else 0,
+            chunk=protocol.VOICE_CHUNK if type_ == protocol.VOICE else None,
         )
+        if type_ in (protocol.VOICE, protocol.TEXT):
+            self._remember(msg_id, dst, packets)
         return msg_id, packets
 
     def send_text(self, dst: int, text: str) -> int:

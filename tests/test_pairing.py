@@ -31,10 +31,18 @@ class FakeLink:
     """Records what the app asks the radio to send."""
 
     def __init__(self, addr=ME):
+        from app.radio.airtime import AirtimeBudget
+
         self.addr = addr
         self.sent = []
         self.peers = {}
         self.callsign = ""
+        self.budget = AirtimeBudget(9600, 1.0)
+
+    def plan(self, dst, size):
+        """As LoraLink.plan for a sealed message: 168 B a fragment, 37 more on air."""
+        fragments = max(1, -(-size // protocol.VOICE_CHUNK))
+        return fragments, size + fragments * 37
 
     def send_pair(self):
         self.sent.append("pair")
@@ -483,3 +491,25 @@ def test_two_radios_on_one_id_are_separated_by_pairing(tmp_path, monkeypatch):
     finally:
         old.link.stop()
         new.link.stop()
+
+
+def test_radios_on_different_channels_pair_and_end_up_on_one(two_radios):
+    """The asker joins the channel of the radio that said yes."""
+    mengpi, jarvis = two_radios
+    mengpi._apply_channel(2)
+    assert mengpi.link.channel == 2 and jarvis.link.channel == 1
+    pair_over_the_air(mengpi, jarvis)
+    assert mengpi.settings.radio.privacy_channel == 1
+    assert mengpi.link.channel == 1
+    assert jarvis.settings.radio.privacy_channel == 1
+    assert "channel 1" in mengpi.state.active_banner
+
+
+def test_the_pair_list_shows_a_radio_on_another_channel(radio, jarvis):
+    open_pairing(radio)
+    body = protocol.pair_body(b"\x01\x02\x03\x04", jarvis.public, "jarvis")
+    beacon_message = protocol.Message(
+        type=protocol.PAIR, src=JARVIS, msg_id=0, body=body, flags=0, missing=[],
+        rssi_dbm=-80, received_at=time.time(), dst=protocol.BROADCAST, channel=4)
+    radio._on_radio_message(beacon_message, Peer(JARVIS, name="jarvis"))
+    assert radio.state.pair_channels[JARVIS] == 4

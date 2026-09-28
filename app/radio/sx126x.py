@@ -25,6 +25,7 @@ Differences from the stock Waveshare `sx126x.py` that matter here:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -47,6 +48,58 @@ REG_VOLATILE = 0xC2
 
 MAX_PACKET = 240
 
+# A port that fails is reopened, but not more often than this.
+REOPEN_SECONDS = 2.0
+
+CMDLINE = "/proc/cmdline"
+
+
+def port_conflicts(port: str) -> list:
+    """What else is using this serial port, in words.
+
+    Anything else reading the port takes bytes meant for the radio -- a
+    fragment arrives short, fails its check, and the message arrives
+    broken or not at all -- and a login shell on it hangs the port up
+    whenever it restarts, which is what "[Errno 5] Input/output error" on
+    a write means. Only processes we may look at are seen, which covers
+    the case that matters: an auto-login shell runs as the same user.
+    """
+    problems = []
+    real = os.path.realpath(port)
+    name = os.path.basename(real)
+    aliases = {name, "serial0"} if name in ("ttyS0", "ttyAMA0") else {name}
+    try:
+        with open(CMDLINE) as handle:
+            arguments = handle.read().split()
+    except OSError:
+        arguments = []
+    if any(arg.startswith("console=") and arg[8:].split(",")[0] in aliases
+           for arg in arguments):
+        problems.append(f"the kernel console is on {name}")
+
+    own = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == own:
+            continue
+        try:
+            descriptors = os.listdir(f"/proc/{entry}/fd")
+        except OSError:
+            continue  # another user's process
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(f"/proc/{entry}/fd/{descriptor}")
+            except OSError:
+                continue
+            if target == real:
+                try:
+                    with open(f"/proc/{entry}/comm") as handle:
+                        command = handle.read().strip()
+                except OSError:
+                    command = "a process"
+                problems.append(f"{command} ({entry}) has {name} open")
+                break
+    return problems
+
 
 def band_start(freq_mhz: int) -> int:
     """Base frequency the module counts its channel offset from."""
@@ -65,12 +118,15 @@ class SX126x:
         self.mode_pins = mode_pins
         self._gpio = None
         self._tx_lock = threading.Lock()
+        self.port = port
+        self.uart_baud = uart_baud
+        self.read_timeout = read_timeout
+        self.reopens = 0
+        self._closing = False
+        self._reopen_lock = threading.Lock()
+        self._last_reopen = -REOPEN_SECONDS
 
-        # timeout=None makes read(1) block in the kernel until a byte
-        # arrives -- no wakeups, no polling, no CPU while the channel is
-        # quiet. Provisioning passes a real timeout for its handshake.
-        self.ser = serial.Serial(port, uart_baud, timeout=read_timeout)
-        self.ser.reset_input_buffer()
+        self.ser = self._open()
 
         if mode_pins:
             self._setup_gpio()
@@ -80,6 +136,48 @@ class SX126x:
             port, uart_baud, self.addr, freq_mhz, self.channel,
             mode_pins or "not used (module pre-provisioned)",
         )
+
+    def _open(self):
+        # timeout=None makes read(1) block in the kernel until a byte
+        # arrives -- no wakeups, no polling, no CPU while the channel is
+        # quiet. Provisioning passes a real timeout for its handshake.
+        ser = serial.Serial(self.port, self.uart_baud, timeout=self.read_timeout)
+        ser.reset_input_buffer()
+        return ser
+
+    def _recover(self, failed, reason) -> bool:
+        """Reopen the port after `failed` stopped working.
+
+        True when the port in use is now a fresh one -- reopened here, or
+        already by the other thread. A hung-up port stays dead for good:
+        without this the radio went deaf and mute until the app was
+        restarted, and the log filled with the same write error.
+        """
+        with self._reopen_lock:
+            if self._closing:
+                return False
+            if self.ser is not failed:
+                return True
+            now = time.monotonic()
+            if now - self._last_reopen < REOPEN_SECONDS:
+                return False
+            self._last_reopen = now
+            try:
+                failed.close()
+            except Exception:
+                pass
+            try:
+                self.ser = self._open()
+            except Exception as exc:
+                log.error("could not reopen %s: %s", self.port, exc)
+                return False
+            self.reopens += 1
+            log.warning(
+                "%s failed (%s) and was reopened. If this repeats, something "
+                "else is on the port -- a login console hangs it up whenever "
+                "its shell restarts. ./setup.sh moves the console off it.",
+                self.port, reason)
+            return True
 
     # --- mode pins (only when rewired off 22/27) -----------------------
     def _setup_gpio(self):
@@ -110,8 +208,15 @@ class SX126x:
         chan = self.channel if channel is None else channel
         header = bytes([(dst_addr >> 8) & 0xFF, dst_addr & 0xFF, chan & 0xFF])
         with self._tx_lock:
-            self.ser.write(header + data)
-            self.ser.flush()
+            ser = self.ser
+            try:
+                ser.write(header + data)
+                ser.flush()
+            except (serial.SerialException, OSError) as exc:
+                if not self._recover(ser, exc):
+                    raise
+                self.ser.write(header + data)
+                self.ser.flush()
 
     # --- receive -------------------------------------------------------
     def read_blocking(self) -> bytes:
@@ -120,13 +225,15 @@ class SX126x:
         Returns b"" when the port is closed or the read is cancelled,
         which is how the reader thread learns to stop.
         """
+        ser = self.ser
         try:
-            first = self.ser.read(1)
+            first = ser.read(1)
             if not first:
                 return b""
-            waiting = self.ser.in_waiting
-            return first + (self.ser.read(waiting) if waiting else b"")
-        except (serial.SerialException, OSError, TypeError):
+            waiting = ser.in_waiting
+            return first + (ser.read(waiting) if waiting else b"")
+        except (serial.SerialException, OSError, TypeError) as exc:
+            self._recover(ser, exc)
             return b""
 
     def wake_reader(self):
@@ -137,6 +244,7 @@ class SX126x:
             pass
 
     def close(self):
+        self._closing = True
         self.wake_reader()
         try:
             self.ser.close()

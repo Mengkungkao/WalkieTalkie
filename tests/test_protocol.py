@@ -78,3 +78,22 @@ def test_best_rssi_is_kept_across_fragments():
     reassembler.push(decode(packets[0], rssi_dbm=-110))
     message = reassembler.push(decode(packets[1], rssi_dbm=-80))
     assert message.rssi_dbm == -80
+
+
+def test_a_late_fragment_of_a_finished_message_is_not_a_new_one():
+    """Resent for another listener, it must not start the message over."""
+    reassembler = Reassembler()
+    packets = [decode(p) for p in fragment(VOICE, 1, 4, b"x" * 400)]
+    for packet in packets:
+        reassembler.push(packet)
+    assert reassembler.push(packets[1]) is None
+    assert reassembler.pending == 0
+
+
+def test_the_wait_allows_for_fragments_still_on_their_way():
+    """Asking for fragment 5 while it is still being sent wastes airtime."""
+    reassembler = Reassembler(fragment_seconds=0.5)
+    first = decode(fragment(VOICE, 1, 4, b"x" * 1000)[0])     # 1 of 6
+    reassembler.push(first)
+    wait = reassembler.next_deadline() - protocol.time.monotonic()
+    assert wait > protocol.QUIET_SECONDS + 4 * 0.5

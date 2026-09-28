@@ -61,7 +61,15 @@ class AudioSettings:
     capture_device: str = "auto"
     playback_device: str = "auto"
     preferred_card: str = "whisplay"
-    codec_mode: str = "700C"
+    # The Whisplay card's "mic" control, set at every start so all radios
+    # sound alike. The driver turns it into analog boost: 100% is +29 dB,
+    # which overdrove the Pi's preamp on ordinary speech and made it sound
+    # muddy; 80% (+20 dB) is what the radio that sounded clear had. None
+    # leaves the mixer as it is.
+    mic_level: int | None = 80
+    # Codec2 mode: 3200 is the clearest, 700C packs the most messages into
+    # the hour's airtime. Settings > Voice quality changes it on the device.
+    codec_mode: str = "3200"
     max_record_seconds: float = 20.0
     cues: bool = True
 

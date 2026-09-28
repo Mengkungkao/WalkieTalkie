@@ -114,9 +114,20 @@ EMPTY_INBOX_ACTIONS = {
     TRIPLE: (GO_BACK, "back"),
 }
 
-# Four clicks exits from anywhere, and hold always talks. Neither is
-# remapped per screen: the way out and the way to transmit must not
-# depend on where you happen to be.
+# Where holding the button talks: inside Start -- choosing who to talk
+# to, and talking. Everywhere else a hold does nothing. Menus are for
+# choosing, and a hold that transmitted while you were looking for a
+# setting went out to whoever was last chosen, unasked. Receive is for
+# listening back to what came in.
+TALK_SCREENS = frozenset({START, CONTACTS, TALK})
+
+
+def can_talk(screen: str) -> bool:
+    return screen in TALK_SCREENS
+
+
+# Four clicks exits from anywhere; the way out must not depend on where
+# you happen to be.
 #
 # Exiting closes the serial port, so the radio stops listening until the
 # app is opened again. That is the deliberate trade: the app is a thing
@@ -175,5 +186,6 @@ def hints(screen: str, inbox_empty: bool = False) -> list:
     # app, which is exactly the drift this module exists to prevent.
     global_label = table[QUAD][1] if QUAD in table else "hide"
     first = "  ·  ".join(parts[:2])
-    second = "  ·  ".join(parts[2:] + ["hold talk", f"4 {global_label}"])
+    talk = ["hold talk"] if can_talk(screen) else []
+    second = "  ·  ".join(parts[2:] + talk + [f"4 {global_label}"])
     return [first, second]

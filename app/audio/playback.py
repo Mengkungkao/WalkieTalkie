@@ -13,6 +13,7 @@ import struct
 import subprocess
 import threading
 
+from app.audio import dsp
 from app.audio.codec2 import SAMPLE_RATE
 from app.utils.logger import get_logger
 
@@ -110,16 +111,20 @@ class Player:
         return True
 
     def _play(self, pcm: bytes) -> bool:
+        # Everything here is 8 kHz -- decoded speech and the cues alike --
+        # and goes to the card at its own rate, converted with a proper
+        # filter rather than by ALSA's, which leaves a metallic edge.
+        pcm = dsp.upsample(pcm)
         command = [
             "aplay", "-q", "-D", self.device, "-t", "raw",
-            "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", "1", "-",
+            "-f", "S16_LE", "-r", str(dsp.HARDWARE_RATE), "-c", "1", "-",
         ]
         with self._lock:
             try:
                 self._process = subprocess.Popen(
                     command, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
                 )
-                self._process.communicate(pcm, timeout=len(pcm) / 2 / SAMPLE_RATE + 10)
+                self._process.communicate(pcm, timeout=len(pcm) / 2 / dsp.HARDWARE_RATE + 10)
                 return self._process.returncode == 0
             except Exception:
                 log.warning("playback failed", exc_info=True)

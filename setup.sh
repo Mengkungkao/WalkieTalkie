@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # One-shot setup for the LoRa Walkie-Talkie: a Whisplay HAT plus a
-# Waveshare SX126X LoRa HAT. Works out which board it is on and runs the
-# matching installer:
+# Waveshare SX126X LoRa HAT. Each board has its own installer, which can
+# be run directly; this works out which board it is on and runs that one:
 #
-#   setup/raspberrypi.sh   Raspberry Pi, Raspberry Pi OS
-#   setup/orangepi.sh      Orange Pi Zero 2W, Orange Pi OS or Armbian
+#   ./install-raspberrypi.sh        Raspberry Pi, Raspberry Pi OS
+#   ./install-orangepi-zero2w.sh    Orange Pi Zero 2W, Orange Pi OS or Armbian
 #
 #   ./setup.sh                    walk through every step, asking before changes
 #   ./setup.sh --yes              accept every prompt (unattended)
@@ -55,5 +55,7 @@ case "$BOARD" in
         exit 1 ;;
 esac
 
-echo "Board: $BOARD -- running setup/$BOARD.sh"
-exec "$HERE/setup/$BOARD.sh" "${ARGS[@]}"
+INSTALLER=install-raspberrypi.sh
+[ "$BOARD" = orangepi ] && INSTALLER=install-orangepi-zero2w.sh
+echo "Board: $BOARD -- running ./$INSTALLER"
+exec "$HERE/$INSTALLER" "${ARGS[@]}"

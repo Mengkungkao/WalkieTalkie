@@ -151,3 +151,51 @@ def test_home_counts_what_is_new(radio):
     radio.inbox.items = [object(), object(), object()]
     radio._refresh_menus()
     assert radio.state.home_items[1]["value"].startswith("2 new")
+
+
+# --- where a hold talks ------------------------------------------------------
+class FakeRecorder:
+    available = True
+
+    def __init__(self):
+        self.started = 0
+
+    def start(self):
+        self.started += 1
+        return True
+
+
+def hold(radio):
+    radio.recorder = FakeRecorder()
+    radio.codec = object()
+    radio.display.set_led = lambda *_a: None
+    radio._on_talk_start()
+    return radio.recorder.started
+
+
+@pytest.mark.parametrize("key", ["receive", "settings"])
+def test_a_hold_in_a_menu_or_receive_does_not_talk(radio, key):
+    if key == "receive":
+        go_to(radio, "receive")
+    else:
+        go_to(radio, "settings")
+    screen = radio.state.screen
+    assert hold(radio) == 0
+    assert radio.state.screen == screen
+
+
+def test_a_hold_on_home_says_where_talking_is(radio):
+    assert hold(radio) == 0
+    assert "Start" in radio.state.active_banner
+
+
+def test_receive_says_it_is_for_listening(radio):
+    go_to(radio, "receive")
+    hold(radio)
+    assert "listening" in radio.state.active_banner
+
+
+def test_a_hold_inside_start_talks(radio):
+    go_to(radio, "start")
+    assert hold(radio) == 1
+    assert radio.state.screen == TALK

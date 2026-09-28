@@ -1,4 +1,5 @@
-# Shared by setup/raspberrypi.sh and setup/orangepi.sh; not run directly.
+# Shared by install-raspberrypi.sh and install-orangepi-zero2w.sh; not run
+# directly.
 #
 # Each board installer sets STEPS, sources this file (which parses the
 # command line and moves to the project root), then runs its own steps
@@ -193,6 +194,49 @@ PY
 }
 
 # -------------------------------------------------------------- daemon
+find_whisplay_runtime() {
+    # Prints the Whisplay runtime directory: the places app/board.py looks.
+    local dir
+    for dir in "${WHISPLAY_RUNTIME:-}" "$HOME/Whisplay/runtime" "$HERE/../Whisplay/runtime" \
+               /opt/whisplay/runtime /usr/local/share/whisplay/runtime; do
+        if [ -n "$dir" ] && [ -f "$dir/whisplay_client.py" ]; then
+            echo "$dir"
+            return
+        fi
+    done
+}
+
+check_dc_fix() {
+    # check_dc_fix RUNTIME_DIR
+    #
+    # The stock Whisplay driver raises the LCD's DC line to send pixels
+    # and leaves it high. With the LoRa HAT's jumpers fitted DC is the
+    # module's M1, and M1 high is configuration mode: the module transmits
+    # nothing, hears nothing, and answers every write with FF FF FF. This
+    # is why two radios could not find each other to pair.
+    local runtime=$1 driver="$1/whisplay.py" checkout
+    checkout=$(dirname "$runtime")
+    [ -f "$driver" ] || return
+    if grep -q "DC doubles as the LoRa module's M1" "$driver"; then
+        ok "the Whisplay driver parks DC (the radio's M1) low"
+        return
+    fi
+    warn "the Whisplay driver leaves DC high after drawing, and DC is the radio's M1:"
+    info "the module sits in configuration mode, sending and hearing nothing."
+    if ask "patch $driver and restart whisplay-daemon?"; then
+        if git -C "$checkout" apply "$HERE/docs/whisplay-dc-fix.patch" 2>/dev/null \
+           || (cd "$checkout" && patch -p1 --forward -s < "$HERE/docs/whisplay-dc-fix.patch"); then
+            sudo systemctl restart whisplay-daemon \
+                && ok "patched, and whisplay-daemon restarted" \
+                || bad "patched; restart it: sudo systemctl restart whisplay-daemon"
+        else
+            bad "the patch did not apply; make the change in docs/whisplay-dc-fix.patch by hand"
+        fi
+    else
+        bad "the radio cannot send or receive until DC is parked low"
+    fi
+}
+
 register_with_daemon() {
     if systemctl is-active --quiet whisplay-daemon; then
         ok "whisplay-daemon is running"

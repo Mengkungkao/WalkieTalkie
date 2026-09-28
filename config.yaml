@@ -43,9 +43,13 @@ audio:
   capture_device: auto
   playback_device: auto
   preferred_card: whisplay
-  # 700C is 700 bps: robotic but intelligible, and 100 bytes per second.
-  # 1300 sounds better and costs 1.75x the airtime. 3200 is 4x.
-  codec_mode: 700C
+  # Microphone level (the Whisplay card's "mic" control), set at every
+  # start. 100% overdrives the preamp and sounds muddy; 80 is clear.
+  mic_level: 80
+  # Codec2 mode. 3200 is the clearest and the default; 1600 is half the
+  # airtime; 700C packs the most messages into the hour but sounds
+  # robotic. Change it on the device under Settings > Voice quality.
+  codec_mode: "3200"
   max_record_seconds: 20
   cues: true
 

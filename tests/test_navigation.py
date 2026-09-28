@@ -93,11 +93,18 @@ def test_empty_inbox_hint_tells_the_truth():
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
-def test_every_hint_mentions_talk_and_exit(screen):
+def test_every_hint_says_how_to_exit_and_where_to_talk(screen):
     """Wording is abbreviated to fit the panel; the meaning must survive."""
     text = " ".join(nav.hints(screen)).lower()
-    assert "talk" in text, "every screen must say how to transmit"
     assert "exit" in text, "every screen must say how to leave the app"
+    if nav.can_talk(screen):
+        assert "hold talk" in text, f"{screen} talks on a hold, and must say so"
+    else:
+        assert "hold" not in text, f"{screen} must not advertise a hold it ignores"
+
+
+def test_only_start_the_paired_list_and_talk_talk_on_a_hold():
+    assert {s for s in ALL_SCREENS if nav.can_talk(s)} == {START, CONTACTS, TALK}
 
 
 def test_every_screen_is_reachable_from_home():

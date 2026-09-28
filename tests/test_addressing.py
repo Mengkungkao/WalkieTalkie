@@ -179,3 +179,16 @@ def test_handshakes_and_beacons_do_not_drive_the_progress_bar(trio):
     alice.send_text(2, "real")
     inbox.wait(count=3)
     assert progress == [(1, 1)]
+
+
+def test_pairing_is_heard_across_channels(trio):
+    """Two radios on different channels must still be able to find each
+    other to pair -- the first real pairing attempt failed on exactly this."""
+    alice, bob, _carol = trio
+    inbox = Collector()
+    bob.on_message(inbox)
+    alice.set_channel(2)
+    alice.send_pair()
+    message, _peer = inbox.wait()[0]
+    assert message.type == protocol.PAIR and message.channel == 2
+    assert bob.stats.other_channel == 0

@@ -40,11 +40,49 @@ second**:
 | Codec2 1300 | 1.6 kB | 9 | 2.1 s | 17 |
 
 So the app is **store-and-forward**, not streaming: record → encode →
-fragment → transmit → reassemble → decode → play. At these rates a
-ten-second message takes about two seconds of air, and the duty cycle
-holds a couple of dozen of them an hour. The app tracks that budget in a
-rolling one-hour window and refuses to transmit past it
-([app/radio/airtime.py](app/radio/airtime.py)).
+fragment → transmit → reassemble → decode → play. The app tracks the
+airtime budget in a rolling one-hour window and refuses to transmit past
+it ([app/radio/airtime.py](app/radio/airtime.py)).
+
+### Voice quality
+
+700C is intelligible but sounds robotic, so the default is now **3200**,
+Codec2's clearest mode, and **Settings → Voice quality** trades clarity
+for airtime. Each message says which mode it is in, so radios set
+differently still understand each other.
+
+| Voice quality | STOI | 10 s message | fragments | airtime | per hour @ 1% |
+|---|---|---|---|---|---|
+| **Clear (3200)** — default | **0.87** | 4.0 kB | 24 | 7.0 s | 5 |
+| Balanced (1600) | 0.83 | 2.0 kB | 12 | 3.5 s | 10 |
+| Most messages (700C) | 0.73 | 1.0 kB | 6 | 1.7 s | 20 |
+
+STOI is an objective intelligibility score (0–1; 1 is the original),
+measured on recorded human speech through the app's whole voice path;
+airtime is sealed and framed, at 9600 bps. A message is on the air — and
+reaches the other radio — about that long after you let go, and short
+messages cost proportionally less: three seconds at Clear is about two
+seconds of air. If "duty cycle full" starts turning messages away, step
+down to Balanced, which loses little clarity for half the airtime.
+
+The voice path matters as much as the codec. The sound cards run at
+48 kHz — the Orange Pi's offers nothing else — and ALSA's own conversion
+to and from Codec2's 8 kHz does not filter: it folded hiss into the
+voice on the way in (speech scored 0.957 before any codec touched it)
+and left a metallic edge on the way out. The app now opens the cards at
+48 kHz and converts itself, with a proper low-pass filter
+([app/audio/dsp.py](app/audio/dsp.py)), then high-passes speech at
+120 Hz and levels it to −9 dBFS before encoding. With the old path, 3200
+scored only 0.75; the filtering is what lets the better codec show.
+
+**The microphone level** is set by the app at every start
+(`audio.mic_level`, 80 by default). The Whisplay driver's `mic` control
+is analog boost as much as volume — 80% is +20 dB, 100% is +29 dB — and
+at 100% ordinary speech overdrives the preamp. That is distortion before
+anything digital happens, so no filter or codec can take it out again:
+the Pi, left at 100%, sounded muddy to the Orange Pi while the Orange Pi,
+at 80%, sounded clear to the Pi. Each recording now logs its peak and
+how much of it clipped, and the screen says `mic too loud` when it did.
 
 ---
 
@@ -112,10 +150,17 @@ the same port the LoRa HAT uses. `setup.sh` detects and fixes this.
 
 ### The short way
 
+Each board has its own installer. On the device:
+
+| Board | Installer |
+|---|---|
+| Raspberry Pi (Zero 2 W, 4B), Raspberry Pi OS | `./install-raspberrypi.sh` |
+| Orange Pi Zero 2W, Orange Pi OS or Armbian | `./install-orangepi-zero2w.sh` |
+
 ```bash
 git clone git@github.com:Mengkungkao/WalkieTalkie.git
 cd WalkieTalkie
-./setup.sh
+./install-raspberrypi.sh          # or ./install-orangepi-zero2w.sh
 ```
 
 > This repository is private, so a plain HTTPS clone onto a headless Pi
@@ -124,13 +169,15 @@ cd WalkieTalkie
 > ways through that — agent forwarding, a deploy key, or an account key
 > — and the errors each one produces when it is the wrong choice.
 
-`setup.sh` works out whether it is on a Raspberry Pi or an Orange Pi
-Zero 2W and runs [setup/raspberrypi.sh](setup/raspberrypi.sh) or
-[setup/orangepi.sh](setup/orangepi.sh); `--board orangepi` overrides the
-guess. Either one walks all eight steps below, asks before it changes
-anything, and is safe to re-run. `--check` reports without changing;
-`--yes` runs unattended. The Orange Pi differs in a few places — see
-[Orange Pi Zero 2W](#orange-pi-zero-2w).
+Each installs the packages, frees the LoRa serial port, checks the
+pins, audio and Whisplay driver, registers **WalkieTalkie** on the HAT's
+desktop, provisions the radio where the board can, and runs the tests.
+It asks before it changes anything and is safe to re-run; `--check`
+reports without changing, `--yes` runs unattended. They share their
+helpers ([setup/common.sh](setup/common.sh)) and differ where the boards
+do — see [Orange Pi Zero 2W](#orange-pi-zero-2w). `./setup.sh` works out
+which board it is on and runs the right one, which is what `deploy.sh`
+uses.
 
 From a development machine, one command copies the project over,
 installs it, and adds **WalkieTalkie** to the Whisplay HAT's desktop. It
@@ -138,7 +185,8 @@ opens an ssh session for setup's questions and the device's sudo
 password:
 
 ```bash
-./deploy.sh jarvis@192.168.0.33 --setup
+./deploy.sh jarvis@192.168.0.33 --setup      # a Raspberry Pi
+./deploy.sh orangepi@192.168.0.130 --setup   # an Orange Pi Zero 2W
 ```
 
 Nothing else needs configuring by hand. A fresh install picks its own
@@ -310,24 +358,38 @@ to `~/.whisplay-daemon/daemon-app.log`; raise the level with
 
 ### Orange Pi Zero 2W
 
-Both HATs fit its 40-pin header. Set up from a development machine the
-same way as a Pi:
+Both HATs fit its 40-pin header. Install from a development machine:
 
 ```bash
 ./deploy.sh orangepi@192.168.0.130 --setup   # asks for sudo; reboot when told
-ssh orangepi@192.168.0.130 'cd WalkieTalkie && ./setup.sh --check'   # after it
+ssh orangepi@192.168.0.130 'cd WalkieTalkie && ./install-orangepi-zero2w.sh --check'
 ```
 
-[setup/orangepi.sh](setup/orangepi.sh) handles what is different from the Pi:
+[install-orangepi-zero2w.sh](install-orangepi-zero2w.sh) handles what is
+different from the Pi:
 
 - **The LoRa port is the debug console.** Header pins 8/10 are UART0
-  (`/dev/ttyS0`). Orange Pi OS ships with `console=both`, and logs a
-  shell in on that port automatically: whatever the radio receives is
-  typed into it, and the shell's output is transmitted. The console is
-  set in `/boot/orangepiEnv.txt` (`armbianEnv.txt` on Armbian), not
-  `cmdline.txt`; setup changes it to `console=display`, which also stops
-  the auto-login after a reboot. U-Boot still prints to the port for a
-  moment at power-on.
+  (`/dev/ttyS0`). Orange Pi OS ships with `console=both` and a systemd
+  drop-in that logs `orangepi` in on that port automatically. The shell
+  reads whatever the radio receives as typing, its output is
+  transmitted, it takes bytes the app was waiting for — so fragments
+  arrive short and voice breaks up — and every time it restarts it hangs
+  the port up, which is what `write failed: [Errno 5] Input/output
+  error` in the log means.
+
+  The console is set in `/boot/orangepiEnv.txt` (`armbianEnv.txt` on
+  Armbian), not `cmdline.txt`, and **`console=display` is not enough on
+  Orange Pi OS**: its boot script adds `console=ttyS0` for `display` as
+  well as `both`. The installer reads `/boot/boot.cmd` to tell, and on
+  that image sets `console=none` with `extraargs=console=tty1`. It also
+  masks `serial-getty@ttyS0` outright. After the reboot, check:
+
+  ```bash
+  tr ' ' '\n' < /proc/cmdline | grep console   # console=tty1 only
+  fuser -v /dev/ttyS0                          # nothing
+  ```
+
+  U-Boot still prints to the port for a moment at power-on.
 - **The Whisplay HAT needs PiSugar's Orange Pi driver.** It enables SPI1
   for the LCD and adds the `whisplaysound` card, which the app picks
   automatically. Without it the app runs headless, with no screen or
@@ -342,6 +404,12 @@ ssh orangepi@192.168.0.130 'cd WalkieTalkie && ./setup.sh --check'   # after it
 - **The M0/M1 clash is the same.** The jumpers land on header pins 15
   and 13, which here are PI5 and PH3, the Whisplay backlight and DC
   lines. Remove the jumpers exactly as on the Pi.
+- **So is the DC fix, and PiSugar's Orange Pi installer does not have
+  it.** Without it the module sits in configuration mode — it sends
+  nothing and hears nothing — which is why the first Orange Pi could not
+  find the Pi to pair. Both installers check for it and apply
+  [docs/whisplay-dc-fix.patch](docs/whisplay-dc-fix.patch); see
+  [The backlight is also the radio's M0](#the-backlight-is-also-the-radios-m0).
 - **The radio cannot be provisioned from the Orange Pi yet.**
   `provision_radio.py` and `radio.mode_pins` drive M0/M1 through
   `RPi.GPIO`, which only runs on a Raspberry Pi. The settings are stored
@@ -366,20 +434,25 @@ WALKIE                         orangepizero2w · ID 6235 · ch 3
 
 | Screen | 1 click | 2 clicks | 3 clicks | hold |
 |---|---|---|---|---|
-| **Home** | next row | open it | Status | talk |
+| **Home** | next row | open it | Status | — |
 | **Start** | next row | open it | back | talk |
 | **Paired** | next radio | talk to it | back | talk |
 | **Talk** | Receive | back | replay last voice | **talk** |
-| **Receive** | next message | back | play it | talk |
-| **Status** | back | back | Settings | talk |
-| **Settings** | next setting | open it | back | talk |
-| **Pair** | next radio found | pair with it | back | talk |
+| **Receive** | next message | back | play it | — (listen only) |
+| **Status** | back | back | Settings | — |
+| **Settings** | next setting | open it | back | — |
+| **Pair** | next radio found | pair with it | back | — |
 | *editor* | change value | next field / save | cancel | — |
 
-Four clicks exits from anywhere. Hold-to-talk works on every screen and
-talks to whoever you last chose under Start — ALL until you pick someone
-— so you never have to navigate somewhere before you can answer. Home
-shows who that is (`now talking to jarvis`).
+Four clicks exits from anywhere. **Holding the button talks only inside
+Start** — on the Start menu, the Paired list and Talk — to whoever you
+last chose there: ALL until you pick someone. Home shows who that is
+(`now talking to jarvis`). Everywhere else a hold does nothing and says
+so: menus are for choosing, and a hold that transmitted while you were
+looking for a setting went out to whoever was last chosen, unasked.
+**Receive is for listening** — to what has arrived, and to new messages,
+which still play as they come in — not for talking. The microphone is
+only kept warm where a hold can talk, which also saves power.
 
 There are two kinds of screen. **Menus** — Home, Start, Paired, Settings
 and Pair — are lists you pick from, so two clicks opens the highlighted
@@ -446,15 +519,18 @@ this radio: orangepizero2w · ID 6235
 ```
 
 1. Each radio announces itself every 3 seconds while the screen is open,
-   and lists the other radios it hears doing the same. Both must be on
-   the same privacy channel.
+   and lists the other radios it hears doing the same — on any privacy
+   channel; a radio on another channel shows its channel (`ch 2`).
 2. On one radio, highlight the other and **2 clicks** to pair. It shows a
    four-digit **code** and waits.
 3. The other radio asks: *orangepizero2w wants to pair — code 4821*.
    **Check the code is the same on both screens.** Then click onto
    **YES** (it starts on **no**) and 2 clicks.
 4. Both radios save each other, with keys, and are connected. Each lands
-   on the Paired list with the new radio selected.
+   on the Paired list with the new radio selected. If they were on
+   different channels, the one that asked moves to the channel of the one
+   that said yes (`paired with jarvis · now on channel 1`), so they can
+   hear each other afterwards.
 
 The code is what makes pairing safe over the air. It is computed from
 both radios' keys, so anyone who slipped their own key into the exchange
@@ -503,8 +579,10 @@ before you transmit, and Status has a `peer` row.
 ## Privacy and security
 
 **Privacy channels.** Settings → Privacy channel picks one of 16. Radios
-on different channels share the frequency but ignore each other
-completely — like the privacy codes on a handheld walkie-talkie. It is a
+on different channels share the frequency but ignore each other —
+like the privacy codes on a handheld walkie-talkie. The one exception is
+pairing, which is heard on every channel while a radio's Pair screen is
+open, so two radios set differently can still find each other. It is a
 filter, not secrecy: that is what encryption is for.
 
 **Encryption.** Every radio makes its own key pair on first start. When
@@ -543,6 +621,7 @@ button — no editing files over SSH. **Home → Settings.**
 | **Name** | what other radios see: the hostname, or Alpha … Zulu |
 | **Device ID** | this radio's ID, 0–65534; takes effect at once |
 | **Privacy channel** | 1–16; only radios on the same channel hear you |
+| **Voice quality** | Clear (3200), Balanced (1600) or Most messages (700C); see [Voice quality](#voice-quality) |
 | **Base station** | which paired radio counts as base |
 | **Date & time** | fixes timestamps on a Pi with no RTC |
 | **Reset all data** | erases messages, voice clips, paired radios, keys and settings |
@@ -611,21 +690,24 @@ free GPIOs brings the dimming — and the power saving — straight back.
 
 `DC_PIN` is the other half, and only Whisplay can fix it: `_send_data`
 and `_send_data_bytes` raise DC and never lower it, so after any frame
-flush BCM 27 rests high and the module sits in configuration mode. Ending
-each data transfer with DC low costs one GPIO write and is invisible to
-the display, which only samples DC while SPI is clocking.
+flush the line (BCM 27 on a Pi, PH3 on an Orange Pi) rests high and the
+module sits in configuration mode — it answers every write with
+`FF FF FF`, transmits nothing and hears nothing. Ending each data
+transfer with DC low costs one GPIO write and is invisible to the
+display, which only samples DC while SPI is clocking.
 
-The change is written up as [docs/whisplay-dc-fix.patch](docs/whisplay-dc-fix.patch),
-to apply in the Whisplay checkout:
+The change is [docs/whisplay-dc-fix.patch](docs/whisplay-dc-fix.patch).
+Both installers check the Whisplay driver for it and apply it (then
+restart the daemon); by hand:
 
 ```bash
 cd ~/Whisplay && git apply ~/WalkieTalkie/docs/whisplay-dc-fix.patch
 sudo systemctl restart whisplay-daemon
 ```
 
-Once it lands, the Status screen's `mode pins` row should read
-`transparent` instead of `configuration`, and the two radios link on
-their own.
+The app notices a module stuck like this by those `FF FF FF` replies and
+says `radio in setup mode: run the installer`. On a Pi the Status
+screen's `mode` row also reads `configuration` instead of `transparent`.
 
 ## Power
 
@@ -711,11 +793,56 @@ delimiter parser cannot tell it from the start of the next frame without
 holding each message back until another one arrives, which on a quiet
 channel is indistinguishable from a dead radio.
 
-Voice fragments are never retransmitted — at 700 bps a retry costs more
-airtime than the gap it fills — so a missing fragment becomes silence of
-the right duration and the message plays anyway, marked *(gaps)*.
+### When fragments go missing
+
+At the edge of range a message rarely vanishes whole: a fragment or two
+of it does. Three things now keep that from ruining it.
+
+1. **The gap keeps its place.** Voice fragments carry exactly 168 bytes
+   of speech — a whole number of Codec2 frames in every mode, and exactly
+   what a sealed fragment holds. A lost one is kept as 168 bytes of
+   space, which the app fills with encoded silence. Before, what did
+   arrive was joined end to end, every later frame was out of step, and
+   the rest of the message decoded as noise: the "crackle, can't
+   understand it" failure.
+2. **The receiver asks for what is missing.** Two seconds after the last
+   fragment it expects — allowing for the ones still on their way — it
+   sends the sender a small sealed `repair` request naming them. The
+   sender keeps each message for a minute and resends just those, at most
+   twice each; two listeners asking for the same broadcast fragment get
+   one resend between them. Up to two rounds, then:
+3. **What arrived is delivered anyway,** with the gaps silenced and the
+   message marked *(gaps)*. A lost *last* fragment used to leave a
+   message waiting until something else woke the app; the link now has
+   its own timer for that, which sleeps when nothing is half-received.
+
+Repairs cost airtime only when something was lost, and count against
+the duty-cycle budget like anything else.
 
 ---
+
+## Range
+
+Software can make the most of a marginal link — recovering lost
+fragments, keeping partial messages intelligible, not letting another
+process steal the port — but it cannot make a weak signal strong. When
+messages stop arriving at a distance, in order of effect:
+
+1. **Antennas.** The small stock antennas are the weakest part of the
+   link. A proper 868 MHz whip, vertical, clear of the body and the
+   metal of the board, is worth more than anything below. Status shows
+   the signal of the last packet heard; watch it as you walk away.
+2. **Height and line of sight.** Hills, buildings and people absorb
+   868 MHz. Holding the radio up helps more than it looks like it should.
+3. **Air rate.** `radio.air_speed` is 9600. Each halving of it buys
+   roughly 3 dB, so 2400 reaches noticeably further — at four times the
+   airtime per message, which the 1% duty cycle turns into a quarter as
+   many messages an hour. It is a module setting, so **every** module has
+   to be reprovisioned to the same value (on a Pi:
+   `python3 provision_radio.py --air-speed 2400`) and `config.yaml`
+   changed to match on every radio.
+
+`transmit power` is already the module's maximum, 22 dBm.
 
 ## Measuring the link
 
@@ -789,14 +916,20 @@ a duty-cycle exhaustion — entirely in software.
 |---|---|---|
 | `ModuleNotFoundError: No module named 'serial'` | System packages not installed | `./setup.sh` (step 2), or Step 1 by hand |
 | `No such file or directory: '/dev/ttyS0'` | UART disabled | Step 2, then reboot |
-| Garbled or one-way traffic | Login console on the port | Step 3; on an Orange Pi, `./setup.sh` and reboot |
-| `fuser -v /dev/ttyS0` shows `bash` (Orange Pi) | Auto-login shell on the console | `./setup.sh` and reboot |
+| Garbled or one-way traffic | Login console on the port | Step 3; on an Orange Pi, `./install-orangepi-zero2w.sh` and reboot |
+| `fuser -v /dev/ttyS0` shows `bash` (Orange Pi) | Auto-login shell on the console | `./install-orangepi-zero2w.sh` and reboot |
+| `write failed: [Errno 5] Input/output error` in the log | The port was hung up under the app — a login shell on it restarting | The app now reopens the port; to stop it happening, `./install-orangepi-zero2w.sh` and reboot |
+| `LoRa port shared: run ./setup.sh` on screen | Something else has the LoRa port open, or the kernel console is on it | Run the board's installer and reboot |
+| Voice breaks up, or is noise after a point | Fragments lost; before this version a lost fragment garbled the rest | Update; see [When fragments go missing](#when-fragments-go-missing) |
+| Messages stop arriving at a distance | Signal below the module's sensitivity | See [Range](#range) |
+| `to talk: Home > Start` when holding | A hold only talks inside Start | Home → Start, then hold |
 | `cannot drive M0/M1 on this board` | Provisioning from an Orange Pi | Provision the HAT on a Pi |
 | `radio offline` on screen | Port busy or HAT unseated | `fuser -v /dev/ttyS0` |
 | Nothing received | Frequency or air-rate mismatch | `provision_radio.py --check` on both |
 | Two radios cannot hear each other at all | Different privacy channels, or versions | Same channel in Settings; update both |
 | `pair with X first` | A contact from before encryption | Pair again: Home → Pair devices |
-| Pairing lists nobody | The other radio is not on its Pair screen, or on another channel | Open Pair devices on both, same channel |
+| Pairing lists nobody | The other radio's module is in configuration mode (no DC fix), or it is not on its Pair screen | Run that board's installer; open Pair devices on both |
+| `radio in setup mode: run the installer` | The module answers `FF FF FF`: M1 (the LCD's DC line) is held high | Run the board's installer, which applies the DC fix |
 | A paired radio stopped answering after an ID change | It still has the old ID | Pair again |
 | `no microphone` / `no audio hardware` | Sound card not registered | See below |
 | Screen black after exiting the app | Fixed — see below | Update; the app now hands the backlight back lit |
@@ -852,6 +985,126 @@ or overlay problem in the HAT's out-of-tree module, not in this app.
 voice path reports itself unavailable and the app runs on.
 
 ---
+
+## Recent changes
+
+### Crashes, broken-up voice and range (Orange Pi and Pi)
+
+#### Update summary
+- The Orange Pi's "crashes" were its LoRa port being hung up by an
+  auto-login shell on the same port; broken-up voice was lost fragments
+  garbling everything after them; messages lost at a distance were
+  fragments never recovered, or a lost last fragment never delivered.
+  All three are fixed in the app, and the Orange Pi installer now
+  actually moves the console off the port.
+
+#### What changed
+- **Separate installers per board**: `install-raspberrypi.sh` and
+  `install-orangepi-zero2w.sh`; `setup.sh` picks one.
+- **Orange Pi console**: its `boot.cmd` puts `console=ttyS0` on the
+  command line for `console=display` too, so the installer now uses
+  `console=none` + `extraargs=console=tty1` there, and masks
+  `serial-getty@ttyS0`.
+- **Serial port recovery**: a hung-up port (`[Errno 5] Input/output
+  error`) is reopened instead of leaving the radio dead until restart.
+  The app names anything else on the port, on screen and in the log.
+- **Lost fragments**: voice fragments carry 168 bytes (whole Codec2
+  frames); a lost one keeps its place and plays as silence; the receiver
+  asks for missing fragments and the sender resends them; a lost last
+  fragment is delivered by the link's own timer. See
+  [When fragments go missing](#when-fragments-go-missing).
+- **Hold-to-talk** only inside Start (Start, Paired, Talk). Receive is
+  listen-only. The microphone is kept warm only where a hold can talk.
+- **Range** advice written down: [Range](#range).
+- **Pairing could not find the other radio.** Two causes, both fixed:
+  the Orange Pi's Whisplay driver lacked the DC fix, so its module sat in
+  configuration mode, sending and hearing nothing; and the two radios
+  were on different privacy channels. The installers now check for and
+  apply the DC fix (the patch file in `docs/` was malformed and has been
+  regenerated from the working Pi), the app warns when the module
+  answers `FF FF FF`, pairing is heard on every channel, and the radio
+  that asks joins the channel of the one that accepts.
+
+#### Validation
+- `python3 -m pytest tests -q`: 450 passed on the development machine,
+  on the Orange Pi Zero 2W (Ubuntu 22.04, Python 3.10) and on the Pi
+  Zero 2 W (Debian 13, Python 3.13).
+- New tests: `test_repair.py` (lossy fake radios: repair, lost last
+  fragment, unrecoverable gap, two listeners, sealed), `test_voice_gaps.py`
+  (a gap decodes to silence, the rest byte-for-byte),
+  `test_serial_recovery.py` (hung-up port, shared-port detection),
+  hold-to-talk tests in `test_menu.py` and `test_navigation.py`.
+- Evidence behind the fixes: the Orange Pi log (40 tracebacks, all
+  `[Errno 5]` on `/dev/ttyS0`; `/proc/cmdline` still `console=ttyS0`
+  after `console=display`); received clips on the Pi (every incomplete
+  one misaligned — 135, 159, 193 bytes against 4-byte frames — while
+  levels were healthy, −17 to −27 dBFS, no clipping).
+- The installer's console logic was replayed against the Orange Pi's own
+  `boot.cmd` and `orangepiEnv.txt`, including a second run (no change).
+- Both apps start clean on the devices; the Orange Pi's reports the
+  shared port until its installer has run.
+- Radio check between the two boards, same channel, unencrypted beacons
+  once a second for 25 s: before the DC fix the Pi heard nothing and the
+  Orange Pi's own module answered `FF FF FF` to each send; after it, the
+  Orange Pi heard 24 of 25 and the Pi 25 of 25, at −67 dBm.
+- After rebooting the Orange Pi: `/proc/cmdline` has `console=tty1`
+  only, nothing holds `/dev/ttyS0`, and both apps start without warnings.
+  454 tests pass on all three machines.
+
+#### Notes
+- A new Orange Pi needs `./install-orangepi-zero2w.sh` once (it needs
+  sudo) and a reboot; the one used here has had both.
+- Radio-to-radio behaviour (pairing, repair over real RF, range) has to
+  be checked by hand with both devices: it cannot be driven from SSH.
+- Range beyond this needs better antennas or a lower air rate; see
+  [Range](#range).
+
+### Robotic, hard-to-understand voice
+
+#### Update summary
+- Voice sounded synthetic and unclear. Two causes, measured with STOI on
+  recorded speech: the 700C codec (0.73 at best), and ALSA's unfiltered
+  conversion between the cards' 48 kHz and Codec2's 8 kHz, which alone
+  cost enough that no codec could sound clear through it. Together:
+  0.67. Now: 0.87 by default.
+
+#### What changed
+- Capture and playback open the cards at 48 kHz; `app/audio/dsp.py`
+  converts with a proper filter (polyphase, numpy only), then high-passes
+  at 120 Hz and levels speech to −9 dBFS before encoding.
+- Codec2 3200 is the default; **Settings → Voice quality** offers Clear
+  (3200), Balanced (1600) and Most messages (700C), and shows about how
+  many ten-second messages an hour each allows.
+- The shipped `config.yaml` sets `codec_mode: "3200"`.
+
+#### Validation
+- STOI grid on concatenated human speech (ALSA's sample clips), every
+  codec mode, ALSA-linear against filtered conversion, input levels −6 to
+  −30 dBFS, with and without levelling and high-pass; the levelling
+  target (−9 dBFS) was chosen from it. Scoring used a fixed per-mode
+  codec delay, after a first pass with per-clip alignment turned out to
+  produce spurious drops.
+- `tests/test_dsp.py`: pass band within 0.5 dB, a 6 kHz tone kept out of
+  the voice band by more than 50 dB (where plain interpolation lets it
+  in), no mirror image on the way up, exact lengths, levelling and its
+  20 dB cap, hum removal, and the polyphase conversion identical to plain
+  filtering sample for sample. Capture and playback tests check the
+  48 kHz rates. 469 tests pass.
+- Speed on the boards, 20 s clip: down 0.3–0.5 s, levelling 0.3 s, up
+  0.4–0.5 s (1.4 s each way before the polyphase rewrite).
+
+- **Pi → Orange Pi still unclear, Orange Pi → Pi fine.** Both directions
+  arrived complete (3200, no gaps, −55 to −71 dBm), so not the radio.
+  Decoded, the Pi's speech had 4–5 dB more energy below 300 Hz and
+  2.5 dB less at 1–2 kHz than the Orange Pi's. The one difference in the
+  chain: the Pi's `mic` control at 100% (+29 dB boost) against the
+  Orange Pi's 80% (+20 dB). The app now sets 80% at start, on both.
+
+#### Notes
+- Not measured through a real microphone and speaker: the radios were in
+  use. Listen to a message each way at Clear and at Balanced.
+- Clear (3200) takes four times the airtime of 700C: five ten-second
+  messages an hour at 1%. Step down if "duty cycle full" appears.
 
 ## Licence and credits
 

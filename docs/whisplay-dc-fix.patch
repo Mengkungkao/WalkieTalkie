@@ -1,24 +1,27 @@
 Park DC low after each transfer, so it stops muting the LoRa module
 
-DC_PIN is BOARD 13 = BCM 27, which the Waveshare SX1262 HAT uses as the
-module's M1. _send_data and _send_data_bytes raise DC and never lower it,
-so after any frame flush BCM 27 rests high and the module sits in
-configuration mode: it accepts every byte over the UART and radiates
-none of them, and hears nothing.
+DC_PIN is BOARD 13 (BCM 27 on a Pi, PH3 on an Orange Pi Zero 2W), which
+the Waveshare SX1262 HAT uses as the module's M1. _send_data and
+_send_data_bytes raise DC and never lower it, so after any frame flush
+the line rests high and the module sits in configuration mode: it
+accepts every byte over the UART, answers each write with FF FF FF,
+radiates none of them, and hears nothing.
 
 Lowering DC at the end of each data transfer costs one GPIO write and is
 invisible to the display, which only samples DC while SPI is clocking.
 
-Apply from the root of the Whisplay checkout:
+Apply from the root of the Whisplay checkout, then restart the daemon:
 
-    git apply docs/whisplay-dc-fix.patch     # or: patch -p1 < ...
+    git apply ~/WalkieTalkie/docs/whisplay-dc-fix.patch
+    sudo systemctl restart whisplay-daemon
 
+The installers check for this and apply it themselves.
+
+diff --git a/runtime/whisplay.py b/runtime/whisplay.py
+index 5df66af..42fdc06 100644
 --- a/runtime/whisplay.py
 +++ b/runtime/whisplay.py
-@@ -596,6 +596,7 @@
-     def _send_command(self, cmd, *args):
-         self._gpio_output(self.DC_PIN, 0)
-         self.spi.xfer2([cmd])
+@@ -522,6 +522,7 @@ class WhisplayBoard:
          if args:
              self._gpio_output(self.DC_PIN, 1)
              self._send_data(list(args))
@@ -26,27 +29,24 @@ Apply from the root of the Whisplay checkout:
  
      def _send_data(self, data):
          self._gpio_output(self.DC_PIN, 1)
-@@ -603,6 +604,10 @@
-         try:
-             self.spi.writebytes2(data)
-         except AttributeError:
+@@ -531,6 +532,11 @@ class WhisplayBoard:
              max_chunk = 4096
              for i in range(0, len(data), max_chunk):
                  self.spi.writebytes(data[i : i + max_chunk])
-+        # Leave DC low. It is only sampled while SPI is clocking, so the
-+        # display does not care -- but on a stacked SX1262 LoRa HAT this
-+        # line is the module's M1, and leaving it high parks the radio in
-+        # configuration mode, where it can neither send nor receive.
++        # Leave DC low. The display only samples it while SPI is clocking,
++        # so it cannot tell -- but on a stacked SX1262 LoRa HAT this line
++        # is the module's M1, and leaving it high parks the radio in
++        # configuration mode, where it can neither send nor hear.
 +        self._gpio_output(self.DC_PIN, 0)
  
      def _send_data_bytes(self, data: bytes | bytearray):
          """Fast path for bytes/bytearray — avoids Python list overhead."""
-@@ -612,6 +617,8 @@
-         try:
-             self.spi.writebytes2(data)
-         except AttributeError:
+@@ -541,6 +547,8 @@ class WhisplayBoard:
              max_chunk = 4096
              for i in range(0, len(data), max_chunk):
                  self.spi.writebytes(list(data[i : i + max_chunk]))
 +        # See _send_data: DC doubles as the LoRa module's M1.
 +        self._gpio_output(self.DC_PIN, 0)
+ 
+     def set_window(self, x0, y0, x1, y1, use_horizontal=0):
+         if use_horizontal in (0, 1):

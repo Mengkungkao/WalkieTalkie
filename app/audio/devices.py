@@ -88,6 +88,36 @@ def resolve(configured: str | None, kind: str, preferred_card: str | None = None
     return device
 
 
+def set_mic_level(device: str | None, percent: int | None) -> bool:
+    """Set the Whisplay card's "mic" control on `device`'s card.
+
+    False, and nothing changed, when there is nothing to set: no level
+    configured, a device that is not a card number, or a card without
+    that control (anything but the Whisplay driver).
+    """
+    if percent is None or not device:
+        return False
+    match = re.search(r"(?:hw|plughw):(\d+)", device)
+    if not match:
+        return False
+    card = match.group(1)
+    percent = max(0, min(100, int(percent)))
+    try:
+        controls = subprocess.run(["amixer", "-c", card, "scontrols"],
+                                  capture_output=True, text=True, timeout=5).stdout
+        if "'mic'" not in controls:
+            return False
+        done = subprocess.run(["amixer", "-q", "-c", card, "sset", "mic", f"{percent}%"],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if done.returncode != 0:
+        log.warning("could not set the mic level on card %s: %s", card, done.stderr.strip())
+        return False
+    log.info("mic level on card %s set to %d%%", card, percent)
+    return True
+
+
 def diagnose(preferred_card: str | None = None) -> str:
     """One-line summary for the status screen.
 

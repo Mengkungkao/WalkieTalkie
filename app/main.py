@@ -22,13 +22,14 @@ whole point on a device meant to sit on a belt all day.
 
 from __future__ import annotations
 
+import dataclasses
 import signal
 import threading
 import time
 
 from app import board as board_module
 from app.audio import devices as audio_devices
-from app.audio.capture import Recorder
+from app.audio.capture import CLIPPED_TOO_MUCH, Recorder
 from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
                               NAME_BY_MODE, SAMPLE_RATE)
 from app.audio.playback import CUE_ERROR, Player, cues_for, voice_for
@@ -39,7 +40,7 @@ from app.radio import protocol
 from app.radio import modepins
 from app.config.settings import hostname_callsign
 from app.radio.link import LoraLink, NotPaired
-from app.radio.sx126x import SX126x
+from app.radio.sx126x import SX126x, port_conflicts
 from app.store.inbox import Inbox
 from app.store.keyring import Keyring
 from app.store.overrides import Overrides
@@ -83,6 +84,11 @@ PAIR_ANSWER_SECONDS = 30.0
 # At most one reply a radio that is not pairing sends to a clashing one.
 CLASH_REPLY_SECONDS = 10.0
 
+# Settings > Voice quality: Codec2 modes, clearest first. Scored with STOI
+# (0-1, intelligibility) on recorded speech through the whole path:
+# 3200 0.866, 1600 0.83, 700C 0.73.
+VOICE_QUALITIES = (("Clear", "3200"), ("Balanced", "1600"), ("Most messages", "700C"))
+
 # Names offered under Settings > Name, after this machine's hostname.
 CALLSIGNS = ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf",
              "Hotel", "India", "Juliet", "Kilo", "Lima", "Mike", "November",
@@ -105,6 +111,7 @@ class WalkieApp:
     _pair_beacon_due = 0.0
     _last_clash_reply = -CLASH_REPLY_SECONDS
     _return_screen = SETTINGS
+    _warned_config_mode = False
 
     def __init__(self, settings):
         self.settings = settings
@@ -164,6 +171,7 @@ class WalkieApp:
             settings.audio.capture_device, "capture", settings.audio.preferred_card)
         playback_device = audio_devices.resolve(
             settings.audio.playback_device, "playback", settings.audio.preferred_card)
+        audio_devices.set_mic_level(capture_device, settings.audio.mic_level)
         self.recorder = Recorder(capture_device, settings.audio.max_record_seconds)
         self.player = Player(playback_device)
 
@@ -249,6 +257,17 @@ class WalkieApp:
         self.state.radio_note = health.get("detail", "")
         if self.state.radio_deaf:
             self.state.flash("radio deaf: check M0/M1", 10.0)
+
+        shared = port_conflicts(radio_settings.port)
+        if shared:
+            log.error(
+                "the LoRa port %s is shared: %s. Whatever else reads it takes "
+                "bytes meant for the radio, so messages arrive broken or not "
+                "at all, and a login shell hangs the port up when it restarts. "
+                "Run ./setup.sh on this device, then reboot.",
+                radio_settings.port, "; ".join(shared))
+            self.state.radio_note = "LoRa port shared: run setup"
+            self.state.flash("LoRa port shared: run ./setup.sh", 10.0)
 
         self.link.on_message(self._on_radio_message)
         self.link.on_tx_progress(self._on_tx_progress)
@@ -526,6 +545,8 @@ class WalkieApp:
              "value": f"{self.settings.radio.address}  ·  unique to this radio"},
             {"key": "channel", "label": "Privacy channel",
              "value": f"{self.settings.radio.privacy_channel}  ·  others are ignored"},
+            {"key": "voice", "label": "Voice quality",
+             "value": self._voice_summary(self.settings.audio.codec_mode)},
             {"key": "base", "label": "Base station", "value": base_name},
             {"key": "clock", "label": "Date & time",
              "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
@@ -551,7 +572,8 @@ class WalkieApp:
         key = items[self.state.settings_index % len(items)]["key"]
         opener = {
             "name": self._edit_name, "device_id": self._edit_device_id,
-            "channel": self._edit_channel, "base": self._edit_base,
+            "channel": self._edit_channel, "voice": self._edit_voice,
+            "base": self._edit_base,
             "clock": self._edit_clock, "reset": self._edit_reset,
         }[key]
         opener()
@@ -588,6 +610,33 @@ class WalkieApp:
         index = next((i for i, (_l, n) in enumerate(choices) if n == current), 0)
         self._begin_edit(ChoiceEditor(choices, index), "CHANNEL",
                          "only radios on the same channel hear you")
+
+    def _voice_summary(self, name: str) -> str:
+        label = next((l for l, n in VOICE_QUALITIES if n == name), name)
+        per_hour = self._messages_per_hour(name)
+        return f"{label} ({name})" + (f"  ·  ~{per_hour} × 10 s an hour" if per_hour else "")
+
+    def _messages_per_hour(self, name: str) -> int:
+        """Ten-second messages the hour's airtime holds at this quality."""
+        if self.link is None or name not in MODE_BY_NAME:
+            return 0
+        try:
+            codec = Codec2(MODE_BY_NAME[name])
+        except Codec2Unavailable:
+            return 0
+        size = codec.bytes_for_seconds(10.0)
+        codec.close()
+        _fragments, on_air = self.link.plan(protocol.BROADCAST, size)
+        seconds = self.link.budget.estimate_message(on_air)
+        limit = self.link.budget.limit_seconds
+        return int(limit // seconds) if seconds and limit != float("inf") else 0
+
+    def _edit_voice(self):
+        choices = [(f"{label} ({name})", name) for label, name in VOICE_QUALITIES]
+        current = self.settings.audio.codec_mode
+        index = next((i for i, (_l, n) in enumerate(choices) if n == current), 0)
+        self._begin_edit(ChoiceEditor(choices, index), "VOICE",
+                         "clearer takes more airtime per message")
 
     def _edit_base(self):
         choices = [(e.name, e.address) for e in self.roster.entries()]
@@ -629,6 +678,8 @@ class WalkieApp:
             self._apply_name(editor.value)
         elif title == "CHANNEL":
             self._apply_channel(editor.value)
+        elif title == "VOICE":
+            self._apply_voice(editor.value)
         elif title == "BASE STATION":
             self.overrides.set_base(editor.value)
             self.state.flash(f"base: {editor.text}")
@@ -689,6 +740,26 @@ class WalkieApp:
             self.link.set_channel(channel)
         self._refresh_menus()
         self.state.flash(f"channel {channel}", 3.0)
+
+    def _apply_voice(self, name: str):
+        if name == self.settings.audio.codec_mode or name not in MODE_BY_NAME:
+            return
+        try:
+            codec = Codec2(MODE_BY_NAME[name])
+        except Codec2Unavailable as exc:
+            log.error("cannot switch to codec2 %s: %s", name, exc)
+            self.state.flash("that quality is unavailable", 3.0)
+            return
+        old, self.codec = self.codec, codec
+        self.codec_mode = codec.mode
+        if old is not None:
+            old.close()
+        self.overrides.set("audio", "codec_mode", name)
+        self.settings.audio.codec_mode = name
+        self.state.codec_name = name
+        # Receivers decode each message in the mode it names, so nothing
+        # else has to change, here or on any other radio.
+        self.state.flash(f"voice: {self._voice_summary(name).split('  ·')[0]}", 3.0)
 
     def _add_contact(self, name: str, address: int) -> bool:
         """Save a station as a contact. False if it already was one."""
@@ -768,6 +839,8 @@ class WalkieApp:
             (addr, info["name"], info["rssi"], paired(addr))
             for addr, info in (self._pair_found or {}).items()
         ]
+        self.state.pair_channels = {addr: info.get("channel")
+                                    for addr, info in (self._pair_found or {}).items()}
 
     def _next_found(self):
         found = self.state.pair_found
@@ -799,7 +872,7 @@ class WalkieApp:
         name = name or peer.name or f"node {message.src}"
         fresh = message.src not in self._pair_found
         self._pair_found[message.src] = {"name": name, "rssi": message.rssi_dbm,
-                                         "public": public}
+                                         "public": public, "channel": message.channel}
         self._refresh_pair_view()
         if fresh:
             log.info("pairing: found %s (%d)", name, message.src)
@@ -879,6 +952,13 @@ class WalkieApp:
         self.link.mark_linked(addr)
         self._add_contact(announced or name, addr)
         self._finish_pairing(addr, announced or name)
+        # Pairing is heard across privacy channels, talking is not: the
+        # radio that asked joins the channel of the one that said yes, or
+        # the two would be paired and still unable to hear each other.
+        if message.channel != self.settings.radio.privacy_channel:
+            self._apply_channel(message.channel)
+            self.state.flash(f"paired with {announced or name} · now on channel "
+                             f"{message.channel}", 5.0)
 
     def _on_pair_refused(self, message):
         if self._pairing_with and self._pairing_with[0] == message.src:
@@ -969,6 +1049,11 @@ class WalkieApp:
             self.state.flash("finish editing first")
             self._wake.set()
             return
+        if not navigation.can_talk(self.state.screen):
+            self.state.flash("listening only here" if self.state.screen == INBOX
+                             else "to talk: Home > Start")
+            self._wake.set()
+            return
         if self.link is None:
             self.state.flash("radio offline")
             self._wake.set()
@@ -1000,6 +1085,9 @@ class WalkieApp:
         pcm = self.recorder.stop()
         self.state.radio_state = IDLE
         self.display.set_led(theme.LED_IDLE)
+        if getattr(self.recorder, "last_clipped", 0.0) > CLIPPED_TOO_MUCH:
+            # Distorted at the microphone: no codec can make that clear.
+            self.state.flash("mic too loud: hold the radio further away", 4.0)
 
         duration = len(pcm) / 2 / SAMPLE_RATE
         if duration < MIN_TALK_SECONDS or not pcm:
@@ -1099,6 +1187,7 @@ class WalkieApp:
             self.inbox.add_text(message, name)
             self.state.flash(f"{name}: {message.body.decode('utf-8', 'replace')[:24]}")
         elif message.type == protocol.VOICE:
+            message = self._silence_gaps(message)
             duration = self._voice_duration(message)
             item = self.inbox.add_voice(message, name, duration)
             self.state.flash(f"{name} · {duration:.0f}s voice")
@@ -1110,6 +1199,35 @@ class WalkieApp:
         self.state.unread = self.inbox.unread
         self._refresh_entries()
         self._wake.set()
+
+    def _silence_gaps(self, message):
+        """Fill each lost fragment's place with encoded silence.
+
+        The link keeps a lost fragment's place as zero bytes, so the
+        frames after it still line up; zeros are not silence to Codec2,
+        though, and play as a burst. Encoded silence plays as a pause the
+        length of what was lost, and the words either side stay clear.
+        """
+        if not message.missing or not message.fragment_size:
+            return message
+        mode = message.flags if message.flags in NAME_BY_MODE else self.codec_mode
+        try:
+            codec = self.codec if self.codec and mode == self.codec_mode else Codec2(mode)
+        except Codec2Unavailable:
+            return message
+        if codec is None:
+            return message
+        frame = codec.encode(bytes(codec.samples_per_frame * 2))
+        body = bytearray(message.body)
+        size = message.fragment_size
+        for seq in message.missing:
+            start = seq * size
+            frames = (min(start + size, len(body)) - start) // len(frame)
+            if frames > 0:
+                body[start:start + frames * len(frame)] = frame * frames
+        log.info("silenced %d lost fragment(s) of a voice message from %d",
+                 len(message.missing), message.src)
+        return dataclasses.replace(message, body=bytes(body))
 
     def _voice_duration(self, message) -> float:
         mode = message.flags if message.flags in NAME_BY_MODE else self.codec_mode
@@ -1221,6 +1339,13 @@ class WalkieApp:
             }
         self.state.unread = self.inbox.unread
 
+        if (self.link is not None and not self._warned_config_mode
+                and self.link.stats.config_mode_replies >= 3):
+            # The module answers FF FF FF to everything: M1 is held high.
+            self._warned_config_mode = True
+            self.state.radio_note = "radio stuck in setup mode (M1 high)"
+            self.state.flash("radio in setup mode: run the installer", 10.0)
+
         # Leaving the pairing screen any way at all -- a hold to talk, say
         # -- ends pairing, so it never beacons behind another screen.
         if self._pairing and self.state.screen not in (PAIR, EDIT):
@@ -1275,7 +1400,10 @@ class WalkieApp:
             return
         # Backgrounded: nobody can press talk, so the codec can power down
         # even though our own backlight tracking says the screen is lit.
-        should_be_armed = self.foregrounded and not self.display.screen_off
+        # And only where a hold can talk: elsewhere the pre-roll would keep
+        # the codec powered for a press that cannot happen.
+        should_be_armed = (self.foregrounded and not self.display.screen_off
+                           and navigation.can_talk(self.state.screen))
         if should_be_armed and not self.recorder.armed:
             self.recorder.arm()
         elif not should_be_armed and self.recorder.armed:

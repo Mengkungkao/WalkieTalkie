@@ -4,10 +4,10 @@
 # Waveshare SX126X LoRa HAT) on Raspberry Pi OS. ./setup.sh runs this on
 # a Pi; it can also be run directly.
 #
-#   setup/raspberrypi.sh               walk through every step, asking first
-#   setup/raspberrypi.sh --yes         accept every prompt (unattended)
-#   setup/raspberrypi.sh --check       report only; change nothing
-#   setup/raspberrypi.sh --frequency 915   provision the module for another band
+#   ./install-raspberrypi.sh               walk through every step, asking first
+#   ./install-raspberrypi.sh --yes         accept every prompt (unattended)
+#   ./install-raspberrypi.sh --check       report only; change nothing
+#   ./install-raspberrypi.sh --frequency 915   provision the module for another band
 #
 # Steps that need a reboot say so and stop rather than pretending to have
 # worked. Run it again afterwards; it is safe to re-run and skips
@@ -17,7 +17,7 @@ set -uo pipefail
 STEPS=8
 PORT=/dev/ttyS0
 # shellcheck source=setup/common.sh
-. "$(dirname "$(readlink -f "$0")")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/setup/common.sh"
 
 # ---------------------------------------------------------------- 1. host
 step "Checking the host"
@@ -95,6 +95,12 @@ check_audio
 
 # -------------------------------------------------------------- 6. daemon
 step "Registering with whisplay-daemon"
+RUNTIME=$(find_whisplay_runtime)
+if [ -n "$RUNTIME" ]; then
+    check_dc_fix "$RUNTIME"
+else
+    warn "no Whisplay runtime found -- install PiSugar's Whisplay driver first"
+fi
 register_with_daemon
 
 # ------------------------------------------------------------ 7. provision
