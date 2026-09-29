@@ -288,14 +288,14 @@ See [the hardware section above](#two-hardware-facts-that-shape-the-build).
 <details open>
 <summary><b>Step 5 — Provision the radio (once per device)</b></summary>
 
-Writing the module's settings needs M0/M1 for a few seconds, so stop the
-display daemon first. Settings are stored in non-volatile memory and
-survive power cycles, so this is done once, not at every start.
+Writing the module's settings needs M0/M1 for a few seconds. The tool
+stops the display daemon (which holds them), writes the settings, and
+starts it again, so it needs sudo. Settings are stored in non-volatile
+memory and survive power cycles, so this is done once, not at every
+start. It works the same on a Raspberry Pi and an Orange Pi Zero 2W.
 
 ```bash
-sudo systemctl stop whisplay-daemon
-python3 provision_radio.py --frequency 868
-sudo systemctl start whisplay-daemon
+sudo python3 provision_radio.py --frequency 868
 ```
 
 Every module gets the **same** settings — the same `--frequency` and air
@@ -304,8 +304,10 @@ destination in its own packet header, so a provisioned LoRa HAT works in
 any radio. Read back what a module currently holds without changing it:
 
 ```bash
-python3 provision_radio.py --check
+sudo python3 provision_radio.py --check
 ```
+
+For more range, see [Range](#range): `--range long`.
 </details>
 
 <details open>
@@ -410,12 +412,10 @@ different from the Pi:
   find the Pi to pair. Both installers check for it and apply
   [docs/whisplay-dc-fix.patch](docs/whisplay-dc-fix.patch); see
   [The backlight is also the radio's M0](#the-backlight-is-also-the-radios-m0).
-- **The radio cannot be provisioned from the Orange Pi yet.**
-  `provision_radio.py` and `radio.mode_pins` drive M0/M1 through
-  `RPi.GPIO`, which only runs on a Raspberry Pi. The settings are stored
-  in the module, and every module gets the same ones, so provision the
-  LoRa HAT once on any Pi, then move it across. Device ID and pairing are
-  in the app and work the same on both boards.
+- **Provisioning works here too.** `provision_radio.py` drives M0/M1
+  through libgpiod — lines 261 and 227 of the H618's pin controller here,
+  22 and 27 on a Pi — so the module can be set on either board. Device ID
+  and pairing are in the app and work the same on both boards.
 
 ---
 
@@ -430,6 +430,7 @@ WALKIE                         orangepizero2w · ID 6235 · ch 3
   Receive         ──▶  what has come in, newest first
   Pair devices    ──▶  find another radio and pair with it
   Settings        ──▶  name, Device ID, privacy channel, …
+  Range test      ──▶  probe a paired radio and log the signal (for testing)
 ```
 
 | Screen | 1 click | 2 clicks | 3 clicks | hold |
@@ -438,15 +439,17 @@ WALKIE                         orangepizero2w · ID 6235 · ch 3
 | **Start** | next row | open it | back | talk |
 | **Paired** | next radio | talk to it | back | talk |
 | **Talk** | Receive | back | replay last voice | **talk** |
-| **Receive** | next message | back | play it | — (listen only) |
+| **Receive** | next message | back | play it (and fetch any gaps) | — (listen only) |
 | **Status** | back | back | Settings | — |
 | **Settings** | next setting | open it | back | — |
 | **Pair** | next radio found | pair with it | back | — |
+| **Range test** | mark this spot | stop | probe now | talk to the radio under test |
 | *editor* | change value | next field / save | cancel | — |
 
 Four clicks exits from anywhere. **Holding the button talks only inside
 Start** — on the Start menu, the Paired list and Talk — to whoever you
-last chose there: ALL until you pick someone. Home shows who that is
+last chose there: ALL until you pick someone. (And on the Range test, to
+the radio under test, so voice can be tried at each spot.) Home shows who that is
 (`now talking to jarvis`). Everywhere else a hold does nothing and says
 so: menus are for choosing, and a hold that transmitted while you were
 looking for a setting went out to whoever was last chosen, unasked.
@@ -575,6 +578,41 @@ The Paired list shows the state as a dot: **filled green** answered,
 handshaked, **grey** never heard. A contact from before pairing existed
 says `not paired: pair again`. Talk says `not connected` under the disc
 before you transmit, and Status has a `peer` row.
+
+### In range, or not
+
+A handshake proves the link once. Whether the other radio is *still* in
+range is checked all the time: every paired radio sends one small
+sealed **ping** to all the radios it paired with every two minutes
+(`radio.link_check_seconds`). Each ping also says how strongly its
+sender last heard every other radio, so both ends learn both directions
+of the link from one packet each:
+
+```
+jarvis   55 · in range · -84/-91 dBm       how I hear it / how it hears me
+hilltop  77 · weak signal · -108/-112 dBm
+rover    40 · disconnected · 6m ago
+```
+
+| State | Meaning |
+|---|---|
+| **in range** (green) | heard within the last two check intervals |
+| **weak signal** (amber) | heard, but below −105 dBm one way or the other: one wall or hill from failing |
+| **disconnected** (red ring) | not heard for two intervals — out of range, switched off, or its app closed |
+| **keys changed** (red) | its packets arrive but cannot be opened: it was reset, so pair again |
+| not checked yet (grey) | just started |
+
+The paired list, Talk and Home (`1 paired · jarvis in range`) show it. A
+radio dropping out says so with a banner and the error buzz; coming back,
+with `jarvis back in range` and a chirp. Opening **Talk** on a radio not
+heard in the last minute sends it a **probe** — a ping that asks for an
+answer — so Talk says within a second or two whether you will be heard.
+
+Cost: about 0.16 s of airtime per ping at 9.6k — 30 an hour is about
+5 s, an eighth of the 36 s a 1% duty cycle allows. Checks stop by
+themselves while less than a quarter of the hour's airtime is left, so
+they never crowd out voice; set `link_check_seconds` higher to spend
+less. Pings do not light the screen.
 
 ## Privacy and security
 
@@ -816,8 +854,25 @@ of it does. Three things now keep that from ruining it.
    message waiting until something else woke the app; the link now has
    its own timer for that, which sleeps when nothing is half-received.
 
-Repairs cost airtime only when something was lost, and count against
-the duty-cycle budget like anything else.
+4. **Or asked for again later.** Every radio now keeps what it *sends*
+   too (with the rest of Receive, the newest 50 messages), so a message
+   that arrived with gaps can be completed afterwards. **Replay it** —
+   Receive, highlight it, three clicks: it plays as it is, and the radio
+   asks the sender for just the missing parts. When they come the message
+   is whole (`voice from jarvis: complete now`) and plays again. Its row
+   says `(gaps · play to fix)` beforehand and `(fetching…)` while asking.
+5. **A message missed outright is fetched once back in range.** Pings
+   list the sender's last three voice messages from the past half hour;
+   a radio that finds one it does not have asks for it whole and plays
+   it (`missed voice from jarvis`). One that has gaps is asked for again
+   the same way. Each is tried at most twice.
+
+The request names the message by its number and a fingerprint of one
+fragment the asking radio does hold, because message numbers are one
+byte and come round again; the sender answers only if its copy matches,
+and only a radio the message was sent to. Repairs and fetches cost
+airtime only when something was lost, and count against the duty-cycle
+budget like anything else.
 
 ---
 
@@ -834,15 +889,96 @@ messages stop arriving at a distance, in order of effect:
    the signal of the last packet heard; watch it as you walk away.
 2. **Height and line of sight.** Hills, buildings and people absorb
    868 MHz. Holding the radio up helps more than it looks like it should.
-3. **Air rate.** `radio.air_speed` is 9600. Each halving of it buys
-   roughly 3 dB, so 2400 reaches noticeably further — at four times the
-   airtime per message, which the 1% duty cycle turns into a quarter as
-   many messages an hour. It is a module setting, so **every** module has
-   to be reprovisioned to the same value (on a Pi:
-   `python3 provision_radio.py --air-speed 2400`) and `config.yaml`
-   changed to match on every radio.
+3. **Air rate.** The one setting that buys real distance. `radio.air_speed`
+   ships at 9600; each halving buys roughly 3 dB, so **2400 hears signals
+   about 6 dB weaker** — roughly twice the distance in the open, or one
+   more wall or hill in town. 2400 is also the module's factory setting,
+   the one its 7 km open-field figure is measured at. The price is
+   airtime: four times as much per message.
+
+   | `--range` | air rate | reach vs 9.6k | 10 s at Clear (3200) | at Balanced (1600) | at 700C |
+   |---|---|---|---|---|---|
+   | `normal` | 9600 | — | 7 s air, ~5 an hour | 3.5 s, ~10 | 1.7 s, ~20 |
+   | `long` | 2400 | +6 dB | ~20 s air, ~1–2 an hour | ~10 s, ~3–4 | ~5 s, ~7 |
+   | `longest` | 1200 | +9 dB | ~40 s: not practical | ~20 s, ~1–2 | ~9 s, ~4 |
+
+   "An hour" is the 1% duty cycle; a message also takes that long to
+   arrive. So at `long`, step voice down to Balanced or Most messages in
+   Settings — Voice quality shows the count for the current air rate.
+
+   It is a module setting, and **every radio must match**: until both are
+   changed they cannot hear each other at all. On each radio, one after
+   the other:
+
+   ```bash
+   cd ~/WalkieTalkie && sudo python3 provision_radio.py --range long
+   ```
+
+   That stops the Whisplay daemon for a few seconds (M0/M1 are its lines),
+   writes the module, reads it back, writes `air_speed: 2400` into that
+   radio's `config.yaml` — the app paces its packets and counts airtime by
+   it — and starts the daemon again. Then open the app from the HAT's
+   menu. `--range normal` puts it back. The installers take the same
+   option: `./install-orangepi-zero2w.sh --range long`.
 
 `transmit power` is already the module's maximum, 22 dBm.
+
+**Measure before and after.** The [Range test](#range-test) logs where
+the link gives out; run it once at 9.6k and once at 2.4k over the same
+walk, and compare.
+
+## Range test
+
+A temporary screen for testing at a distance: **Home → Range test** on
+the radio you carry. It probes the other paired radio every 30 seconds
+(`radio.range_test_seconds`), and that radio answers on its own — its
+app only has to be running, on any screen.
+
+```
+RANGE TEST             to jarvis · every 30s · air 9.6k
+          80%          8 of the last 10 answered
+ ┌ heard here ──┐ ┌ heard there ─┐
+ │ -97 dBm ▂▄▆  │ │ -104 dBm ▂▄  │   how I hear it · how it hears me
+ └──────────────┘ └──────────────┘
+      answered in 312 ms
+ sent 24 · answered 20 · marks 3 · 12:30
+     range-20260929-101500.csv
+```
+
+| | |
+|---|---|
+| **1 click** | mark this spot: a numbered row in the log (and a chirp) |
+| **2 clicks** | stop; the log is kept |
+| **3 clicks** | probe now, without waiting |
+| **hold** | talk to the radio under test, without leaving the screen |
+
+Every probe is a row in `~/.whisplay-walkie/rangetest/range-<date>.csv`:
+time, answered or not, round trip, signal both ways, and how many probes
+the other radio has heard (so a lost *answer* can be told from a lost
+*probe*). Marks, and voice sent and received during the test with any
+fragments lost, are rows too. Rows are written as they happen, so a
+flat battery at the far end loses nothing. To read them:
+
+```bash
+scp orangepi@192.168.0.130:.whisplay-walkie/rangetest/*.csv .
+python3 tools/range_report.py range-*.csv
+```
+
+```
+== range-20260929-101500.csv
+   whole test    20/24 answered ( 83%)  here median -97, worst -118 ...  there ...
+     start         4/4  answered (100%)  ...
+     after mark 1  8/8  answered (100%)  ...
+     after mark 2  6/8  answered ( 75%)  ...
+     after mark 3  2/4  answered ( 50%)  ...
+   link first gave out (3 unanswered in a row) at 612.4 s, after mark 3
+```
+
+The probes spend the duty cycle like anything else: at 1%, one every
+30 s is about half of each radio's hour (the answers are the other
+radio's half), which leaves room for a few voice tests. A probe that
+would not fit is skipped and logged as such rather than delayed.
+Leaving the screen stops the test.
 
 ## Measuring the link
 
@@ -889,7 +1025,7 @@ The app must be stopped first, since it holds the port:
 ## Testing
 
 ```bash
-python3 -m pytest tests -q     # 54 tests, no hardware required
+python3 -m pytest tests -q     # 554 tests, no hardware required
 ```
 
 Measured on the Pi with the HAT attached, the full audio path runs well
@@ -923,7 +1059,13 @@ a duty-cycle exhaustion — entirely in software.
 | Voice breaks up, or is noise after a point | Fragments lost; before this version a lost fragment garbled the rest | Update; see [When fragments go missing](#when-fragments-go-missing) |
 | Messages stop arriving at a distance | Signal below the module's sensitivity | See [Range](#range) |
 | `to talk: Home > Start` when holding | A hold only talks inside Start | Home → Start, then hold |
-| `cannot drive M0/M1 on this board` | Provisioning from an Orange Pi | Provision the HAT on a Pi |
+| `holds M0/M1 ... Run this with sudo` | `provision_radio.py` run without sudo | `sudo python3 provision_radio.py …` |
+| `cannot take M0/M1` when provisioning | Something still holds the lines | Quit the app (four clicks) and retry |
+| Both radios `disconnected` right after changing `--range` | Only one module changed so far | Provision the other radio with the same `--range` |
+| `jarvis disconnected` while walking | Out of range (or its app closed) | Walk back until `back in range`; see [Range](#range) |
+| `keys changed: pair again` | That radio was reset, or paired elsewhere | Home → Pair devices on both |
+| A message shows `(gaps · play to fix)` | Fragments lost at the edge of range | Receive, three clicks: the missing parts are asked for |
+| `no answer from jarvis` after replaying | The sender is out of range, off, or no longer has it | Try again once back in range |
 | `radio offline` on screen | Port busy or HAT unseated | `fuser -v /dev/ttyS0` |
 | Nothing received | Frequency or air-rate mismatch | `provision_radio.py --check` on both |
 | Two radios cannot hear each other at all | Different privacy channels, or versions | Same channel in Settings; update both |
@@ -987,6 +1129,99 @@ voice path reports itself unavailable and the app runs on.
 ---
 
 ## Recent changes
+
+### In range or not, fetching a message again, more range, and a range test
+
+#### Update summary
+- Each paired radio is now shown as **in range**, **weak signal** or
+  **disconnected**, with the signal both ways, from a small encrypted
+  ping every two minutes. Dropping out and coming back are announced.
+- A voice message that arrived with gaps can be **completed later**:
+  replaying it asks the sender for the missing parts, which it answers
+  from the copy it now keeps of everything it sends. A message missed
+  outright is fetched once the radios are back in range.
+- **More range**: `provision_radio.py --range long` sets the module to
+  2.4k air (about +6 dB, roughly twice the distance in the open), now on
+  the Orange Pi as well as the Pi, and keeps `config.yaml` in step.
+- **Home → Range test**, a temporary screen that probes the other radio
+  on a timer and logs every answer to CSV for analysis afterwards, with
+  `tools/range_report.py` to summarise the logs.
+
+#### What changed
+- Protocol: four new sealed message types — `ping`, `pong`, `retrieve`
+  and `resent`. Every radio has to be updated; older versions ignore
+  them, but will not answer them either.
+- [app/radio/linkcheck.py](app/radio/linkcheck.py) works out each radio's
+  state; the paired list, Talk and Home show it. Opening Talk on a radio
+  not heard in the last minute probes it first. See
+  [In range, or not](#in-range-or-not).
+- The link waits up to 20 ms for the signal-strength byte the module
+  sends just after each packet. It usually missed the read that completed
+  the packet, so a lone packet had no reading, and the byte was credited
+  to the next one.
+- Sent voice is kept, with its message number, in Receive's store; the
+  receiver keeps which fragments never arrived. See
+  [When fragments go missing](#when-fragments-go-missing), items 4–5.
+- Repair waits now scale with the air rate. They assumed 9.6k, so at
+  2.4k the second request went out before the first answer could arrive.
+- [provision_radio.py](provision_radio.py) drives M0/M1 through libgpiod
+  on both boards ([app/radio/modelines.py](app/radio/modelines.py)),
+  stops and restarts the Whisplay daemon itself, quits the app, and
+  writes `air_speed` into `config.yaml`. `--range normal|long|longest`;
+  the installers take `--range` too. `tools/provision.sh` now just calls
+  it.
+- [app/rangetest.py](app/rangetest.py), the Range test screen, and
+  [tools/range_report.py](tools/range_report.py). See [Range test](#range-test).
+- `config.yaml`: `radio.link_check_seconds: 120`,
+  `radio.range_test_seconds: 30`.
+
+#### Validation
+- `python3 -m pytest tests -q`: **554 passed** on the development
+  machine, the Orange Pi Zero 2W and the Pi Zero 2 W. New tests:
+  `test_linkcheck.py` (ping and pong formats, every state and transition,
+  a pong over fake radios, no pong when the duty cycle is spent, keys
+  that no longer open, the late signal byte), `test_retrieve.py` (the
+  request, waiting for part of a message, a gap filled over fake radios
+  after repair failed, refusals, the inbox merge, replay → fetch → play,
+  a missed message fetched whole, at most twice, only the sender's own
+  copy of the message meant), `test_rangetest.py` (the CSV, success
+  rate, skipped probes, the report, the screen's gestures, a hold that
+  talks without leaving it), `test_provision.py` (each board's lines,
+  libgpiod 1.x and 2.x, config mode and back, `config.yaml` kept intact),
+  `test_link_status_ui.py` (screens, announcements, when checks go out).
+- **Over the air, both radios on one desk**, with the apps paused and a
+  script using the real keys and link on each:
+  - The Orange Pi's probe was answered in 384 ms: −57 dBm heard here,
+    −58 dBm heard there.
+  - A four-fragment voice message went out with fragment 1 withheld and
+    its repair copy dropped. It arrived with `missing [1]`; the Pi asked
+    for it, the Orange Pi sent it, and the rebuilt message matched the
+    original byte for byte (same SHA-256).
+  - On the Pi all five packets' signal bytes arrived late — before this
+    change, every one of those readings would have gone to the wrong
+    packet.
+- Both apps relaunched from the daemon: each logged the other
+  `not checked yet -> in range` within seconds, and sends its pings; no
+  errors.
+- `provision_radio.py` run without sudo on both boards: it detects the
+  board and its lines (Orange Pi: 261/227 on gpiochip0, which `gpioinfo`
+  shows held by `whisplay`; Pi: 22/27) and stops, asking for sudo. The
+  libgpiod calls were checked against the real bindings on each board.
+- New screens rendered to images and checked by eye.
+
+#### Notes
+- **Not yet done on the hardware: the air rate change itself.** It needs
+  sudo, so run it on each radio, one after the other:
+  `ssh -t orangepi@192.168.0.130 'cd WalkieTalkie && sudo python3 provision_radio.py --range long'`,
+  then the same on `jarvis@192.168.0.33`. Until both are done, they
+  cannot hear each other. Then set Voice quality to Balanced or Most
+  messages: Clear takes ~20 s of air per 10 s message at 2.4k.
+- Range test first at 9.6k, then at 2.4k over the same walk, to see what
+  the change is worth where you use the radios.
+- Distance was not tested: both radios are on one desk. Disconnected and
+  back-in-range were tested in software only.
+- The range test is meant to be temporary; it is one row on Home and one
+  module, easy to remove once the testing is done.
 
 ### Crashes, broken-up voice and range (Orange Pi and Pi)
 

@@ -7,6 +7,12 @@ costs a few milliseconds.
 
 The inbox is capped at `limit` entries and trimmed on write, so an
 unattended radio left receiving overnight cannot fill the card.
+
+Voice this radio sends is kept too, with the message number it went out
+under: a radio that received it with gaps can ask for the missing parts
+again (Receive, three clicks), and one that missed it can ask for all of
+it once back in range. A received message keeps which fragments never
+arrived, so what comes later can be put in its place.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
 from app.radio import protocol
 from app.utils.logger import get_logger
@@ -41,6 +47,20 @@ class Item:
     incomplete: bool = False
     played: bool = False
     outgoing: bool = False
+    # How the message travelled, so it can be asked for again. -1: before
+    # this was kept, and it cannot be.
+    msg_id: int = -1
+    total: int = 0
+    fragment_size: int = 0
+    missing: list = field(default_factory=list)
+    dst: int = protocol.BROADCAST
+    retrieving: bool = False
+    retrieve_tries: int = 0
+
+    @property
+    def can_retrieve(self) -> bool:
+        return (not self.outgoing and self.kind == "voice" and self.msg_id >= 0
+                and bool(self.missing) and self.total > 0)
 
     @property
     def when(self) -> str:
@@ -57,7 +77,12 @@ class Item:
     def summary(self) -> str:
         if self.kind == "text":
             return self.text[:40]
-        mark = " (gaps)" if self.incomplete else ""
+        if self.retrieving:
+            mark = " (fetching…)"
+        elif self.incomplete and self.can_retrieve:
+            mark = " (gaps · play to fix)"
+        else:
+            mark = " (gaps)" if self.incomplete else ""
         return f"voice {self.duration:.1f}s{mark}"
 
 
@@ -73,11 +98,16 @@ class Inbox:
     def _load(self) -> list:
         if not self.path.is_file():
             return []
+        known = {f.name for f in fields(Item)}
         try:
-            return [Item(**entry) for entry in json.loads(self.path.read_text())]
+            items = [Item(**{k: v for k, v in entry.items() if k in known})
+                     for entry in json.loads(self.path.read_text())]
         except Exception:
             log.warning("could not read %s; starting empty", self.path)
             return []
+        for item in items:
+            item.retrieving = False     # whatever was asked for went unanswered
+        return items
 
     def save(self):
         try:
@@ -101,11 +131,13 @@ class Inbox:
 
     def add_voice(self, message, peer_name: str, duration: float,
                   outgoing: bool = False, store_audio: bool = True) -> Item:
+        """Keep a voice message, received or sent.
+
+        What we send is kept as well as what we receive: it is the copy
+        another radio's request for the message is answered from.
+        """
         item_id = uuid.uuid4().hex[:12]
         filename = ""
-        # Our own transmissions are logged for the history but their audio
-        # is not kept: it would double the card usage to store a copy of
-        # something the operator just said.
         if store_audio and message.body:
             filename = f"{item_id}.c2"
             try:
@@ -118,8 +150,67 @@ class Inbox:
             received_at=message.received_at, rssi_dbm=message.rssi_dbm,
             voice_file=filename, codec_mode=message.flags, duration=duration,
             incomplete=not message.complete, outgoing=outgoing,
+            msg_id=message.msg_id, total=message.total,
+            fragment_size=message.fragment_size or protocol.VOICE_CHUNK,
+            missing=list(message.missing), dst=message.dst,
         )
         return self._append(item)
+
+    # --- asking for a message again ------------------------------------------
+    def find(self, src, msg_id: int, total: int, outgoing: bool = False):
+        """The newest kept message this describes, or None. `src` None
+        matches any sender -- for our own, sent under an earlier Device ID."""
+        return next((i for i in self.items
+                     if i.kind == "voice" and i.outgoing == outgoing
+                     and (src is None or i.src == src)
+                     and i.msg_id == msg_id and i.total == total), None)
+
+    def sent_since(self, since: float, limit: int) -> list:
+        """Our own voice messages sent after `since` (wall clock), newest first."""
+        return [i for i in self.items
+                if i.outgoing and i.kind == "voice" and i.msg_id >= 0
+                and i.voice_file and i.received_at >= since][:limit]
+
+    def held_check(self, item: Item):
+        """(seq, fingerprint) of a fragment this item holds, to name it by."""
+        data = self.voice_bytes(item)
+        size = item.fragment_size or protocol.VOICE_CHUNK
+        held = [s for s in range(item.total) if s not in item.missing]
+        if not data or not held:
+            return protocol.NO_CHECK, 0
+        return held[0], protocol.chunk_check(data, held[0], size)
+
+    def merge(self, item: Item, message) -> list:
+        """Put fragments that came again into `item`. Returns their numbers.
+
+        Only fragments the item was missing are taken, into the places
+        kept for them. What is still missing stays as it was stored:
+        silence, of the right length.
+        """
+        size = item.fragment_size or message.fragment_size or protocol.VOICE_CHUNK
+        arrived = [s for s in item.missing
+                   if s not in message.missing and s < message.total]
+        if not arrived or not item.voice_file:
+            return []
+        body = bytearray(self.voice_bytes(item))
+        for seq in arrived:
+            chunk = protocol.chunk_of(message.body, seq, size)
+            start = seq * size
+            if len(body) < start:
+                body.extend(bytes(start - len(body)))
+            if seq == item.total - 1:
+                body[start:] = chunk          # the last may be short
+            else:
+                body[start:start + size] = chunk
+        item.missing = [s for s in item.missing if s not in arrived]
+        item.incomplete = bool(item.missing)
+        try:
+            (self.voice_dir / item.voice_file).write_bytes(bytes(body))
+        except OSError:
+            log.warning("could not store the fragments that came again", exc_info=True)
+            return []
+        self.save()
+        return arrived
 
     def voice_bytes(self, item: Item) -> bytes:
         if not item.voice_file:

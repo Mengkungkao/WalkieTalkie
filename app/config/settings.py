@@ -31,10 +31,17 @@ class RadioSettings:
     # each other, like the privacy codes on a handheld walkie-talkie.
     privacy_channel: int = 1
     frequency_mhz: int = 868
+    # Must match what the module was provisioned with (provision_radio.py
+    # writes both): pacing and the duty-cycle budget are worked out from it.
     air_speed: int = 9600
     power_dbm: int = 22
     uart_baud: int = 9600
     duty_cycle_percent: float = 1.0
+    # Paired radios ping each other this often, to show which are in range
+    # (about 0.16 s of airtime each at 9.6k). 0 turns it off.
+    link_check_seconds: float = 120.0
+    # Home > Range test probes the other radio this often.
+    range_test_seconds: float = 30.0
     # Pins the app should actively drive to select the module's mode.
     # Left unset because GPIO 22 and 27 belong to the Whisplay LCD: the
     # daemon holds them through gpiod, so claiming them throws and the

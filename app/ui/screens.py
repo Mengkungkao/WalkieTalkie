@@ -25,6 +25,8 @@ PAIR = "pair"
 # The menu the app opens on, and the one that picks who to talk to.
 HOME = "home"
 START = "start"
+# Home > Range test: probes a paired radio and logs the answers.
+RANGE = "range"
 # An editor is modal: it owns every gesture while it is open, so it is a
 # screen rather than an overlay on one.
 EDIT = "edit"
@@ -124,6 +126,10 @@ class ViewState:
 
     link_states: dict = field(default_factory=dict)
     target_linked: bool = False
+    # From the link check: addr -> (state, "in range · -85/-91 dBm").
+    link_status: dict = field(default_factory=dict)
+    # Home > Range test, while it runs (see app.rangetest).
+    range_view: dict = field(default_factory=dict)
 
     battery_present: bool = False
     battery_summary: str = ""
@@ -164,6 +170,16 @@ STATE_COLOUR = {
     IDLE: theme.TEXT_DIM, RECORDING: theme.DANGER, SENDING: theme.WARN,
     RECEIVING: theme.OK, PLAYING: theme.VOICE,
 }
+
+# The link check's states (app.radio.linkcheck), as a dot: colour, filled.
+RANGE_DOT = {
+    "in range": (theme.OK, True),
+    "weak signal": (theme.WARN, True),
+    "disconnected": (theme.DANGER, False),
+    "not checked yet": (theme.TEXT_FAINT, False),
+    "keys changed": (theme.DANGER, True),
+}
+RANGE_COLOUR = {state: colour for state, (colour, _filled) in RANGE_DOT.items()}
 STATE_LABEL = {
     IDLE: "READY", RECORDING: "RECORDING", SENDING: "SENDING",
     RECEIVING: "RECEIVING", PLAYING: "PLAYING",
@@ -272,8 +288,13 @@ def draw_contacts(draw, state: ViewState):
         # before finding out nobody received a word. So the dot means
         # "completed a handshake", and presence alone is only a ring.
         link = state.link_states.get(entry.address)
+        reach, reach_detail = state.link_status.get(entry.address, ("", ""))
         if entry.is_broadcast:
             dot, filled = theme.ACCENT, True
+        elif reach:
+            # The link check is live, so it outranks the handshake: a radio
+            # that paired an hour ago and is now out of range is not green.
+            dot, filled = RANGE_DOT.get(reach, (theme.TEXT_FAINT, False))
         elif link == "linked":
             dot, filled = theme.OK, True
         elif link == "calling":
@@ -306,6 +327,8 @@ def draw_contacts(draw, state: ViewState):
             detail = entry.status
         elif entry.address in state.unpaired:
             detail = f"{entry.address} · not paired: pair again"
+        elif reach_detail:
+            detail = f"{entry.address} · {reach_detail}"
         else:
             detail = f"{entry.address} · {entry.status}"
         draw.text((32, top + CONTACT_DETAIL_Y),
@@ -384,8 +407,14 @@ def draw_talk(draw, state: ViewState):
         detail = f"channel {state.channel}  ·  encrypted"
         colour = theme.TEXT_FAINT
         link = state.link_states.get(state.target_address)
+        reach, reach_detail = state.link_status.get(state.target_address, ("", ""))
         if link == "stale" and state.target_address != 0xFFFF:
             detail = f"connected  ·  last heard {state.target_heard}"
+        use_reach = (reach and reach != "not checked yet"
+                     and state.target_address != 0xFFFF)
+        if use_reach:
+            # Whether they will hear this, before a word is spent on it.
+            detail, colour = reach_detail, RANGE_COLOUR.get(reach, theme.TEXT_FAINT)
         if state.radio_deaf:
             # Worth shouting about: everything else looks like it works.
             detail = "RADIO DEAF — check M0/M1 jumpers"
@@ -393,7 +422,7 @@ def draw_talk(draw, state: ViewState):
         elif not state.audio_ok:
             detail = state.audio_note or "no audio device"
             colour = theme.DANGER
-        elif not state.target_linked:
+        elif not state.target_linked and not use_reach:
             # Shown here rather than beside the disc, where it collided
             # with the ring at this font size.
             detail, colour = {
@@ -476,7 +505,8 @@ def draw_status(draw, state: ViewState):
         ("STATION", [
             ("name", state.callsign or "-"),
             ("id", f"{state.address}  ·  channel {state.channel}  ·  encrypted"),
-            ("freq", f"{state.frequency_mhz} MHz  ·  codec2 {state.codec_name}"),
+            ("freq", f"{state.frequency_mhz} MHz  ·  air {stats.get('air', '?')}"
+                     f"  ·  codec2 {state.codec_name}"),
         ]),
         ("LINK", [
             ("peer", "connected" if state.target_linked else "not connected"),
@@ -666,6 +696,85 @@ def draw_pair(draw, state: ViewState):
     draw_footer(draw, state, _hints(PAIR))
 
 
+# --- range test ----------------------------------------------------------
+def _success_colour(success):
+    if success is None:
+        return theme.TEXT_DIM
+    return theme.OK if success >= 0.8 else theme.WARN if success >= 0.4 else theme.DANGER
+
+
+def _duration(seconds: float) -> str:
+    seconds = int(seconds)
+    return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}" \
+        if seconds >= 3600 else f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def draw_range(draw, state: ViewState):
+    """Home > Range test: how the link is doing, readable at arm's length."""
+    # "RANGE TEST" does not fit beside the header's meters.
+    draw_header(draw, state, "RANGE")
+    view = state.range_view or {}
+    small, tiny = theme.font(11), theme.font(10)
+    width = theme.SCREEN_WIDTH - 2 * MARGIN
+    if not view:
+        centred(draw, 110, "no paired radio to test", theme.font(14), theme.TEXT_DIM)
+        centred(draw, 132, "Home > Pair devices first", theme.font(12), theme.TEXT_FAINT)
+        draw_footer(draw, state, _hints(RANGE))
+        return
+
+    top = f"to {view.get('name', '?')}  ·  every {view.get('interval', 0):.0f}s" \
+          f"  ·  air {view.get('air', '?')}"
+    centred(draw, CONTENT_TOP, ellipsise(draw, top, small, width), small, theme.TEXT_DIM)
+
+    success = view.get("success")
+    centred(draw, CONTENT_TOP + 16, "--" if success is None else f"{success * 100:.0f}%",
+            theme.font(36, "bold"), _success_colour(success))
+    window = view.get("window", (0, 0))
+    centred(draw, CONTENT_TOP + 60,
+            f"{window[0]} of the last {window[1]} answered" if window[1]
+            else "waiting for the first answer", small, theme.TEXT_FAINT)
+
+    # How we hear them, and how they hear us: one-way links are the ones
+    # that fool you, so both are shown side by side.
+    box_top = CONTENT_TOP + 80
+    half = theme.SCREEN_WIDTH // 2
+    for index, (label, rssi) in enumerate((("heard here", view.get("down")),
+                                           ("heard there", view.get("up")))):
+        left = 6 if index == 0 else half + 3
+        right = half - 3 if index == 0 else theme.SCREEN_WIDTH - 6
+        panel(draw, [left, box_top, right, box_top + 52], fill=theme.SURFACE)
+        draw.text((left + 8, box_top + 5), label, font=tiny, fill=theme.TEXT_FAINT)
+        value = "--" if rssi is None else f"{rssi}"
+        draw.text((left + 8, box_top + 20), value, font=theme.font(20, "bold"),
+                  fill=theme.rssi_colour(rssi) if rssi is not None else theme.TEXT_DIM)
+        draw.text((left + 8 + int(draw.textlength(value, font=theme.font(20, "bold"))) + 4,
+                   box_top + 29), "dBm", font=tiny, fill=theme.TEXT_FAINT)
+        signal_bars(draw, right - 28, box_top + 6, rssi, height=10)
+
+    line_y = box_top + 60
+    if state.radio_state == RECORDING:
+        result, colour = f"recording  {state.record_seconds:.1f}s", theme.DANGER
+    elif state.radio_state == SENDING:
+        result, colour = f"sending voice  {state.tx_sent}/{state.tx_total}", theme.WARN
+    elif state.radio_state == PLAYING:
+        result, colour = "playing", theme.VOICE
+    else:
+        result = view.get("last_result", "")
+        colour = (theme.OK if result.startswith("answered") else
+                  theme.DANGER if result.startswith("no answer") else
+                  theme.WARN if result.startswith("skipped") else theme.TEXT_DIM)
+    centred(draw, line_y, ellipsise(draw, result, theme.font(13, "bold"), width),
+            theme.font(13, "bold"), colour)
+
+    counts = (f"{view.get('answered', 0)}/{view.get('sent', 0)} answered"
+              f" · {view.get('marks', 0)} marks · {_duration(view.get('elapsed', 0))}")
+    centred(draw, line_y + 20, ellipsise(draw, counts, small, width), small, theme.TEXT_DIM)
+    if view.get("log"):
+        centred(draw, line_y + 36, ellipsise(draw, view["log"], tiny, width), tiny,
+                theme.TEXT_FAINT)
+    draw_footer(draw, state, _hints(RANGE))
+
+
 def draw_editor(draw, state: ViewState):
     """A modal value editor: one big value, and what the clicks do to it."""
     editor = state.editor
@@ -724,7 +833,7 @@ def draw_editor(draw, state: ViewState):
 RENDERERS = {
     CONTACTS: draw_contacts, TALK: draw_talk, INBOX: draw_inbox,
     STATUS: draw_status, SETTINGS: draw_settings, EDIT: draw_editor,
-    PAIR: draw_pair, HOME: draw_home, START: draw_start,
+    PAIR: draw_pair, HOME: draw_home, START: draw_start, RANGE: draw_range,
 }
 
 

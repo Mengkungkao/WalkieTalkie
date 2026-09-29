@@ -7,11 +7,12 @@
 #   ./install-orangepi-zero2w.sh               walk through every step, asking first
 #   ./install-orangepi-zero2w.sh --yes         accept every prompt (unattended)
 #   ./install-orangepi-zero2w.sh --check       report only; change nothing
+#   ./install-orangepi-zero2w.sh --range long  provision for range (2.4k air; every radio)
 #
 # What differs from the Raspberry Pi: header pins 8/10 are UART0, which
 # is also this board's debug console, so the console is moved off it in
 # /boot/orangepiEnv.txt; the Whisplay HAT needs PiSugar's Orange Pi
-# driver; and the radio cannot be provisioned from this board yet.
+# driver; and M0/M1 are different GPIO lines (PI5/PH3).
 set -uo pipefail
 
 STEPS=8
@@ -182,15 +183,9 @@ check_audio
 
 # ------------------------------------------------------------ 7. provision
 step "Provisioning the radio module"
-warn "not possible from this board yet"
-info "Writing the module's settings means holding M1 high for a few"
-info "seconds, and provision_radio.py drives M0/M1 through RPi.GPIO,"
-info "which only exists on a Raspberry Pi. The settings live in the module"
-info "itself, so provision this LoRa HAT once on a Raspberry Pi running"
-info "this project (./install-raspberrypi.sh, step 7), then fit it back here:"
-info "    python3 provision_radio.py --frequency ${FREQUENCY:-868}"
-info "Every module gets the same settings: the Device ID and pairing are"
-info "handled in the app (Home > Pair devices), not in the module."
+# M0/M1 are PI5/PH3 here; provision_radio.py drives them through libgpiod
+# (python3-libgpiod, which the Whisplay driver needs too).
+provision_module "$PORT"
 
 # ----------------------------------------------------------------- 8. test
 step "Self-test"

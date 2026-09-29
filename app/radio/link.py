@@ -34,11 +34,17 @@ play noise, or wait forever for a last fragment that is never coming,
 it asks the sender for the missing ones (`protocol.REPAIR`) -- the
 sender keeps each message for a minute to answer -- and then delivers
 what it has, with the gaps kept in place for the player to silence.
+
+Later still, a message with gaps can be asked for again (`retrieve`).
+The sender answers from the copy the app keeps on disk (`on_retrieve`),
+with only the fragments asked for (`protocol.RESENT`). Pings that ask
+for an answer are answered here too, with how strongly they arrived.
 """
 
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import queue
 import random
@@ -49,7 +55,7 @@ from dataclasses import dataclass, field
 
 from app.radio import crypto, protocol
 from app.radio.airtime import AirtimeBudget
-from app.radio.framing import Deframer, encode_frame
+from app.radio.framing import SOF, Deframer, encode_frame
 from app.radio.sx126x import SX126x
 from app.utils.logger import get_logger
 
@@ -72,6 +78,18 @@ MAX_RESENDS = 2
 # Two radios asking for the same broadcast fragment inside this window get
 # one resend between them.
 RESEND_GAP = 1.5
+
+# How long to wait for the module's signal-strength byte when it has not
+# arrived with its packet. It follows within a few milliseconds.
+RSSI_WAIT = 0.02
+
+# Asking for a message again: how long the answer may take to start
+# coming, on top of the fragments' own airtime.
+RETRIEVE_WAIT = 4.0
+# One answer per radio per message in this window (a request heard twice
+# is answered once), and no more than this many answers in all.
+RETRIEVE_ANSWER_GAP = 15.0
+RETRIEVE_ANSWERS_MAX = 3
 
 
 class NotPaired(Exception):
@@ -138,6 +156,13 @@ class Stats:
     repairs_asked: int = 0
     fragments_resent: int = 0
     delivered_with_gaps: int = 0
+    pings_tx: int = 0
+    pongs_tx: int = 0
+    pongs_skipped: int = 0
+    retrieves_asked: int = 0
+    retrieves_answered: int = 0
+    retrieves_refused: int = 0
+    late_rssi: int = 0
     last_rssi: int | None = None
     airtime_used: float = 0.0
     queue_depth: int = 0
@@ -183,7 +208,15 @@ class LoraLink:
         self._on_tx_progress = None
         self._on_hello = None
         self._on_clash = None
+        self._on_retrieve = None
         self._peers_lock = threading.Lock()
+        # src -> pings heard from it, which each pong reports back.
+        self._pings_heard = {}
+        # (src, msg_id) -> [answers, last answered at]
+        self._retrieve_answers = {}
+        # src -> when a packet from it last failed to open: a paired radio
+        # whose keys no longer match ours, which only pairing again fixes.
+        self.unreadable = {}
 
     # --- callbacks -----------------------------------------------------
     def on_message(self, callback):
@@ -211,6 +244,16 @@ class LoraLink:
         our own transmission echoed back. Called on the receive thread.
         """
         self._on_clash = callback
+
+    def on_retrieve(self, callback):
+        """callback(src, request: protocol.Retrieve) -> (body, flags) or None.
+
+        Another radio asks for one of our messages again. Return its
+        encoded body and flags to send the fragments asked for, or None
+        when it is not ours to give: gone, never sent to that radio, or
+        not the message the request describes. On the receive thread.
+        """
+        self._on_retrieve = callback
 
     def set_address(self, addr: int):
         """Take a new Device ID. Effective from the next packet, both ways."""
@@ -253,7 +296,7 @@ class LoraLink:
                 continue
             self.stats.bytes_rx += len(data)
             self._watch_for_config_mode(data)
-            for payload, rssi_byte in self._deframer.feed(data):
+            for payload, rssi_byte in self._frames(data):
                 self._handle_payload(payload, rssi_byte)
             self.stats.frames_dropped = self._deframer.frames_bad
             # The module appends its RSSI report after the packet, and it
@@ -262,6 +305,32 @@ class LoraLink:
             # the channel's most recent reading.
             if self._deframer.last_rssi_byte is not None:
                 self.stats.last_rssi = -(256 - self._deframer.last_rssi_byte)
+
+    def _frames(self, data: bytes) -> list:
+        """Frames completed by `data`, each with its signal strength.
+
+        The module sends a packet's signal strength as one byte right
+        after it, and that byte usually misses the read that completed
+        the packet. Taken as "the latest reading" it described the
+        previous packet instead -- fine for a meter, wrong for measuring
+        a link one packet at a time. So when a frame completes without
+        it, the byte is waited for, briefly.
+        """
+        frames = self._deframer.feed(data)
+        if not frames or frames[-1][1] is not None or self._deframer.buffered:
+            return frames
+        read_pending = getattr(self.radio, "read_pending", None)
+        late = read_pending(RSSI_WAIT) if read_pending else b""
+        if not late:
+            return frames
+        self.stats.bytes_rx += len(late)
+        self._watch_for_config_mode(late)
+        if Deframer.plausible_rssi(late[0]) and not late.startswith(SOF):
+            frames[-1] = (frames[-1][0], late[0])
+            self._deframer.last_rssi_byte = late[0]
+            self.stats.late_rssi += 1
+            late = late[1:]
+        return frames + (self._deframer.feed(late) if late else [])
 
     def _watch_for_config_mode(self, data: bytes):
         """Count FF FF FF: what a module in configuration mode says.
@@ -363,6 +432,7 @@ class LoraLink:
         plain = crypto.open_sealed(key, packet.header, packet.body)
         if plain is None:
             self.stats.failed_to_open += 1
+            self.unreadable[packet.src] = time.time()
             if self.stats.failed_to_open in (1, 10, 100):
                 log.warning("a packet from %d failed to open: altered, or its "
                             "keys changed -- pair again if this persists",
@@ -377,6 +447,7 @@ class LoraLink:
         self._seen.append(marker)
         self._seen_set.add(marker)
         packet.body = plain
+        self.unreadable.pop(packet.src, None)   # its keys work again
         return True
 
     def _report_clash(self, name: str):
@@ -392,9 +463,17 @@ class LoraLink:
         if message.type == protocol.REPAIR:
             self._resend(message)          # plumbing, not for the app
             return
-        self.stats.messages_rx += 1
-        peer.messages += 1
-        if message.missing:
+        if message.type == protocol.RETRIEVE:
+            self._answer_retrieve(message)
+            return
+        if message.type == protocol.PING:
+            # Answered here, before the app sees it, so the answer leaves
+            # while the channel is known to be clear between the two.
+            self._answer_ping(message)
+        elif message.type != protocol.PONG:
+            self.stats.messages_rx += 1
+            peer.messages += 1
+        if message.missing and message.type != protocol.RESENT:
             self.stats.delivered_with_gaps += 1
 
         if message.type in (protocol.HELLO, protocol.HELLO_ACK):
@@ -419,11 +498,16 @@ class LoraLink:
             peer.rejected = True
             peer.linked_at = 0.0
             log.warning("%s (%d) refused the link", peer.name or "?", peer.addr)
-        log.info(
-            "rx %s from %d (%s) %d B%s",
+        # Pings arrive every couple of minutes: worth a line only when
+        # looking for them.
+        log.log(
+            logging.DEBUG if message.type in (protocol.PING, protocol.PONG)
+            else logging.INFO,
+            "rx %s from %d (%s) %d B%s%s",
             message.type_name, message.src, peer.name or "unknown",
             len(message.body),
             f", missing {message.missing}" if message.missing else "",
+            f", {message.rssi_dbm} dBm" if message.rssi_dbm is not None else "",
         )
         if self._on_message:
             try:
@@ -493,13 +577,19 @@ class LoraLink:
         now = time.monotonic()
         with self._reassembly:
             for key, partial in self._reassembler.due(now):
-                src, msg_id, _type = key
+                src, msg_id, type_ = key
                 too_old = now - partial.last_seen >= self._reassembler.timeout
+                # Something asked for again is not repaired in turn: it was
+                # the repair, and it can simply be asked for once more.
                 if (partial.repairs < protocol.REPAIR_ROUNDS and not too_old
+                        and type_ != protocol.RESENT
                         and self.can_send(src, protocol.REPAIR)):
                     missing = partial.missing
-                    wait = (protocol.REPAIR_WAIT
-                            + protocol.REPAIR_WAIT_PER_FRAGMENT * len(missing))
+                    # Each fragment asked for takes its airtime to come
+                    # back -- four times as long at 2.4k as at 9.6k.
+                    per_fragment = max(protocol.REPAIR_WAIT_PER_FRAGMENT,
+                                       self._reassembler.fragment_seconds)
+                    wait = protocol.REPAIR_WAIT + per_fragment * len(missing)
                     self._reassembler.postpone(key, wait)
                     asks.append((src, msg_id, missing))
                 else:
@@ -514,7 +604,7 @@ class LoraLink:
         for message in finished:
             if message is None:
                 continue
-            peer = self._touch_peer(message.src, message.rssi_dbm)
+            peer = self._touch_peer_quiet(message.src)
             log.info("delivering %s from %d with %d fragment(s) missing: %s",
                      message.type_name, message.src, len(message.missing), message.missing)
             self._deliver(message, peer)
@@ -553,6 +643,110 @@ class LoraLink:
             log.info("resending %d fragment(s) of message %d for %d",
                      len(again), msg_id, message.src)
             self._enqueue(dst, again, f"resend/{msg_id}", report=False)
+
+    # --- pings ------------------------------------------------------------
+    def _answer_ping(self, message):
+        """Count every ping; answer the ones that ask, if the air allows."""
+        heard = self._pings_heard.get(message.src, 0) + 1
+        self._pings_heard[message.src] = heard
+        ping = protocol.parse_ping(message.body)
+        if ping is None or not ping.reply or not self.can_send(message.src, protocol.PONG):
+            return
+        rssi = message.rssi_dbm if message.rssi_dbm is not None else self.stats.last_rssi
+        _id, packets = self._fragments(protocol.PONG, message.src,
+                                       protocol.pong_body(ping.seq, rssi, heard))
+        # An answer that has to wait for the duty cycle arrives after the
+        # asker gave up, and only spends airtime the hour may need.
+        if self.budget.wait_seconds(len(encode_frame(packets[0]))) > 0:
+            self.stats.pongs_skipped += 1
+            return
+        self.stats.pongs_tx += 1
+        self._enqueue(message.src, packets, "pong", report=False)
+
+    def send_ping(self, dst: int, body: bytes) -> int:
+        """A ping to one radio, or to every paired radio at once."""
+        msg_id, packets = self._fragments(protocol.PING, dst, body)
+        self.stats.pings_tx += 1
+        self._enqueue(dst, packets, "ping", report=False)
+        return msg_id
+
+    def packet_seconds(self, type_: int, dst: int, body_size: int) -> float:
+        """Airtime of a one-fragment message with this much body."""
+        sealing, _key = self._sealing(type_, dst)
+        overhead = crypto.OVERHEAD if sealing != protocol.CLEAR else 0
+        frame = len(encode_frame(bytes(protocol.HEADER_SIZE + overhead + body_size)))
+        return self.budget.estimate(frame)
+
+    # --- asking for a message again ------------------------------------------
+    def retrieve(self, src: int, msg_id: int, total: int, wanted=(),
+                 check_seq: int = protocol.NO_CHECK, check: int = 0,
+                 flags: int = 0, fragment_size: int = protocol.VOICE_CHUNK) -> float:
+        """Ask `src` for fragments of its message `msg_id` again.
+
+        `wanted` empty asks for the whole message. What comes back is
+        delivered as one RESENT message once the fragments are in, or when
+        the wait runs out -- with `missing` naming whatever did not come,
+        which is everything if nobody answered. Returns the wait.
+        """
+        wanted = sorted(set(wanted))
+        room = protocol.MAX_BODY - crypto.OVERHEAD - 5
+        if len(wanted) > room:
+            wanted = []                   # too many to list: ask for all
+        count = len(wanted) or total
+        seconds = RETRIEVE_WAIT + count * self._reassembler.fragment_seconds
+        with self._reassembly:
+            self._reassembler.expect((src, msg_id, protocol.RESENT), total, wanted,
+                                     flags=flags, fragment_size=fragment_size,
+                                     seconds=seconds)
+            self._reassembly.notify_all()
+        body = protocol.retrieve_body(msg_id, total, check_seq, check, wanted)
+        _id, packets = self._fragments(protocol.RETRIEVE, src, body)
+        self.stats.retrieves_asked += 1
+        log.info("asking %d for %s of message %d again", src,
+                 f"{len(wanted)} fragment(s)" if wanted else "all", msg_id)
+        self._enqueue(src, packets, f"retrieve/{msg_id}", report=False)
+        return seconds
+
+    def _answer_retrieve(self, message):
+        request = protocol.parse_retrieve(message.body)
+        if request is None or self._on_retrieve is None:
+            return
+        key = (message.src, request.msg_id)
+        now = time.monotonic()
+        answers, last = self._retrieve_answers.get(key, (0, -RETRIEVE_ANSWER_GAP))
+        if now - last < RETRIEVE_ANSWER_GAP:
+            return                        # the same request, heard twice
+        if answers >= RETRIEVE_ANSWERS_MAX:
+            self.stats.retrieves_refused += 1
+            log.info("not sending message %d to %d a %d time", request.msg_id,
+                     message.src, answers + 1)
+            return
+        try:
+            found = self._on_retrieve(message.src, request)
+        except Exception:
+            log.exception("retrieve handler failed")
+            found = None
+        if found is None:
+            self.stats.retrieves_refused += 1
+            log.info("%d asked for message %d again: not one we can send it",
+                     message.src, request.msg_id)
+            return
+        body, flags = found
+        try:
+            _id, packets = self._fragments(protocol.RESENT, message.src, body,
+                                           flags=flags, msg_id=request.msg_id)
+        except NotPaired:
+            return
+        if len(packets) != request.total:
+            self.stats.retrieves_refused += 1
+            return
+        wanted = [s for s in sorted(set(request.seqs)) if s < len(packets)]
+        chosen = [packets[s] for s in wanted] if wanted else packets
+        self._retrieve_answers[key] = (answers + 1, now)
+        self.stats.retrieves_answered += 1
+        log.info("sending %d fragment(s) of message %d to %d again",
+                 len(chosen), request.msg_id, message.src)
+        self._enqueue(message.src, chosen, f"resent/{request.msg_id}", report=False)
 
     def _touch_peer(self, addr: int, rssi) -> Peer:
         with self._peers_lock:
@@ -599,15 +793,18 @@ class LoraLink:
         framing = len(encode_frame(b"")) + protocol.HEADER_SIZE + overhead
         return fragments, size + fragments * framing
 
-    def _fragments(self, type_: int, dst: int, body: bytes, flags: int = 0):
+    def _fragments(self, type_: int, dst: int, body: bytes, flags: int = 0,
+                   msg_id: int | None = None):
         sealing, key = self._sealing(type_, dst)
-        msg_id = next(self._msg_ids)
+        if msg_id is None:
+            msg_id = next(self._msg_ids)
         packets = protocol.fragment(
             type_, self.addr, msg_id, body, flags=flags, dst=dst,
             channel=self.channel, sealing=sealing,
             seal=(lambda header, chunk: crypto.seal(key, header, chunk)) if key else None,
             overhead=crypto.OVERHEAD if key else 0,
-            chunk=protocol.VOICE_CHUNK if type_ == protocol.VOICE else None,
+            chunk=(protocol.VOICE_CHUNK
+                   if type_ in (protocol.VOICE, protocol.RESENT) else None),
         )
         if type_ in (protocol.VOICE, protocol.TEXT):
             self._remember(msg_id, dst, packets)

@@ -23,8 +23,8 @@ play.
 from __future__ import annotations
 
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
-from app.ui.screens import (CONTACTS, EDIT, HOME, INBOX, PAIR, SETTINGS, START,
-                            STATUS, TALK)
+from app.ui.screens import (CONTACTS, EDIT, HOME, INBOX, PAIR, RANGE, SETTINGS,
+                            START, STATUS, TALK)
 
 # Actions the app implements. Names, not callables, so this module stays
 # free of app state and can be imported by the screens.
@@ -42,6 +42,8 @@ NEXT_SETTING = "next_setting"
 OPEN_SETTING = "open_setting"
 NEXT_FOUND = "next_found"
 PAIR_SELECTED = "pair_selected"
+MARK_SPOT = "mark_spot"          # range test: note where you are, in the log
+PROBE_NOW = "probe_now"          # range test: don't wait for the timer
 # Back to wherever this screen was opened from. One action rather than a
 # "back to X" per screen, because Talk, Receive and Settings can each be
 # reached from more than one place.
@@ -104,6 +106,14 @@ SCREEN_ACTIONS = {
         DOUBLE: (PAIR_SELECTED, "pair"),
         TRIPLE: (GO_BACK, "back"),
     },
+    # Carried on a walk: one click marks the spot, the easiest gesture to
+    # make with the radio in a pocket. Two clicks, as everywhere, is back,
+    # which ends the test.
+    RANGE: {
+        SINGLE: (MARK_SPOT, "mark"),
+        DOUBLE: (GO_BACK, "stop"),
+        TRIPLE: (PROBE_NOW, "probe"),
+    },
 }
 
 # An empty inbox has nothing to step through and nothing to play, so
@@ -115,11 +125,12 @@ EMPTY_INBOX_ACTIONS = {
 }
 
 # Where holding the button talks: inside Start -- choosing who to talk
-# to, and talking. Everywhere else a hold does nothing. Menus are for
-# choosing, and a hold that transmitted while you were looking for a
-# setting went out to whoever was last chosen, unasked. Receive is for
-# listening back to what came in.
-TALK_SCREENS = frozenset({START, CONTACTS, TALK})
+# to, and talking -- and on the range test, to the radio under test, so
+# voice can be tried at each spot. Everywhere else a hold does nothing.
+# Menus are for choosing, and a hold that transmitted while you were
+# looking for a setting went out to whoever was last chosen, unasked.
+# Receive is for listening back to what came in.
+TALK_SCREENS = frozenset({START, CONTACTS, TALK, RANGE})
 
 
 def can_talk(screen: str) -> bool:

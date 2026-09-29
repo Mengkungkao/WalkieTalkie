@@ -29,10 +29,15 @@ Every radio has to run the same version: an older radio's packets are
 not understood, and it does not understand ours.
 
 Messages larger than one packet are split into fragments sharing a
-`msg_id`, numbered `seq` of `total`. There are no retransmissions on the
-voice path: at 700 bps a redelivery costs more airtime than the gap it
-fills, so `Reassembler` substitutes silence for anything missing and
-plays on. Text is short enough to be acknowledged and is retried.
+`msg_id`, numbered `seq` of `total`. A receiver missing some asks for
+them by number (REPAIR) while the message is fresh, and plays what it
+has with the gaps silenced. Later -- on replay, or once the sender is
+back in range -- it can ask for the rest again (RETRIEVE), which the
+sender answers from the copy it keeps (RESENT).
+
+Paired radios also ping each other now and then (PING), so each knows
+whether the other is in range and how strongly each hears the other; a
+ping that asks for an answer gets a PONG.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-from app.radio.framing import MAX_FRAME_PAYLOAD
+from app.radio.framing import MAX_FRAME_PAYLOAD, crc16
 
 VERSION = 3
 HEADER = struct.Struct(">BBHHBBBB")  # ver_type, chan_seal, src, dst, msg_id, seq, total, flags
@@ -70,11 +75,16 @@ PAIR = 0x7  # "I am pairing" -- token, public key, name
 PAIR_REQUEST = 0x8  # "pair with me" -- public key, then our secrets sealed for you
 PAIR_ACCEPT = 0x9  # "yes" -- the same, back
 REPAIR = 0xA  # "resend these" -- msg_id, then the missing fragment numbers
+PING = 0xB  # "are you there?" -- see ping_body
+PONG = 0xC  # "yes" -- the ping's number, and how strongly it arrived
+RETRIEVE = 0xD  # "send me that voice message again" -- see retrieve_body
+RESENT = 0xE  # a voice message sent again: its own msg_id, seq and total
 
 TYPE_NAMES = {HELLO: "hello", TEXT: "text", VOICE: "voice", ACK: "ack",
               BYE: "bye", HELLO_ACK: "hello-ack", REJECT: "reject",
               PAIR: "pair", PAIR_REQUEST: "pair-request",
-              PAIR_ACCEPT: "pair-accept", REPAIR: "repair"}
+              PAIR_ACCEPT: "pair-accept", REPAIR: "repair", PING: "ping",
+              PONG: "pong", RETRIEVE: "retrieve", RESENT: "resent"}
 
 # The only types that may travel in the clear: they are how two radios
 # agree keys in the first place, or say no. Everything else from a radio
@@ -245,6 +255,149 @@ def parse_pair(body: bytes) -> tuple:
     return bytes(body[:TOKEN_SIZE]), bytes(body[TOKEN_SIZE:start]), name
 
 
+# --- keeping track of each other ---------------------------------------------
+# Signal strength travels as one byte: 256 + dBm, so -1..-255 dBm is
+# 255..1, and 0 means "not measured".
+def rssi_byte(rssi) -> int:
+    return 0 if rssi is None else max(1, min(255, 256 + int(rssi)))
+
+
+def rssi_from_byte(value: int):
+    return None if not value else value - 256
+
+
+# A ping asks for an answer (a pong) only when this bit is set. The
+# regular link check does not, so it costs one packet per radio, not two.
+PING_REPLY = 0x01
+
+
+@dataclass
+class Recent:
+    """One of the sender's recent messages, as its pings list them."""
+
+    msg_id: int
+    total: int
+    check: int
+    dst: int
+
+
+@dataclass
+class Ping:
+    seq: int
+    reply: bool
+    interval: int                   # seconds to the sender's next ping; 0 = none
+    reports: dict                   # addr -> dBm the sender last heard it at
+    recent: list                    # [Recent]: what it sent lately
+
+
+_REPORT = struct.Struct(">HB")
+_RECENT = struct.Struct(">BBHH")
+MAX_REPORTS = 8
+MAX_RECENT = 3
+
+
+def ping_body(seq: int, interval: int = 0, reply: bool = False,
+              reports: dict | None = None, recent=()) -> bytes:
+    """seq, flags, interval(2), then two counted lists.
+
+    `reports` says how strongly each radio was last heard, so a radio
+    learns how well it is heard as well as how well it hears. `recent`
+    names the sender's latest voice messages, so a radio that missed one
+    -- out of range when it went -- can ask for it once it is back.
+    """
+    reports = list((reports or {}).items())[:MAX_REPORTS]
+    recent = list(recent)[:MAX_RECENT]
+    out = bytearray([seq & 0xFF, PING_REPLY if reply else 0])
+    out += struct.pack(">H", max(0, min(0xFFFF, int(interval))))
+    out.append(len(reports))
+    for addr, rssi in reports:
+        out += _REPORT.pack(addr & 0xFFFF, rssi_byte(rssi))
+    out.append(len(recent))
+    for item in recent:
+        out += _RECENT.pack(item.msg_id & 0xFF, item.total & 0xFF,
+                            item.check & 0xFFFF, item.dst & 0xFFFF)
+    return bytes(out)
+
+
+def parse_ping(body: bytes) -> Ping | None:
+    if len(body) < 4:
+        return None
+    ping = Ping(seq=body[0], reply=bool(body[1] & PING_REPLY),
+                interval=struct.unpack_from(">H", body, 2)[0], reports={}, recent=[])
+    offset = 4
+    if offset < len(body):
+        count, offset = body[offset], offset + 1
+        for _ in range(count):
+            if offset + _REPORT.size > len(body):
+                return ping
+            addr, value = _REPORT.unpack_from(body, offset)
+            ping.reports[addr] = rssi_from_byte(value)
+            offset += _REPORT.size
+    if offset < len(body):
+        count, offset = body[offset], offset + 1
+        for _ in range(count):
+            if offset + _RECENT.size > len(body):
+                return ping
+            ping.recent.append(Recent(*_RECENT.unpack_from(body, offset)))
+            offset += _RECENT.size
+    return ping
+
+
+def pong_body(seq: int, rssi, heard: int) -> bytes:
+    """The ping's seq, the dBm it arrived at, and how many pings from that
+    radio have been heard: set against how many it sent, that is the
+    share that got through, which a lost pong alone cannot tell apart
+    from a lost ping."""
+    return bytes([seq & 0xFF, rssi_byte(rssi)]) + struct.pack(">H", heard & 0xFFFF)
+
+
+def parse_pong(body: bytes):
+    """(seq, dBm or None, heard) from a pong's body, or None."""
+    if len(body) < 4:
+        return None
+    return body[0], rssi_from_byte(body[1]), struct.unpack_from(">H", body, 2)[0]
+
+
+# --- asking for a voice message again ----------------------------------------
+NO_CHECK = 0xFF
+
+
+@dataclass
+class Retrieve:
+    msg_id: int
+    total: int
+    check_seq: int                  # NO_CHECK: nothing to check against
+    check: int
+    seqs: list                      # the fragments wanted; empty means all
+
+
+def chunk_of(body: bytes, seq: int, size: int) -> bytes:
+    return bytes(body[seq * size:(seq + 1) * size])
+
+
+def chunk_check(body: bytes, seq: int, size: int) -> int:
+    """A fingerprint of one fragment's content.
+
+    Message numbers are one byte and come round again, so "message 17"
+    alone could name an older or newer message than the one meant. The
+    asking radio proves which it means with a fragment it does hold.
+    """
+    return crc16(chunk_of(body, seq, size))
+
+
+def retrieve_body(msg_id: int, total: int, check_seq: int = NO_CHECK,
+                  check: int = 0, seqs=()) -> bytes:
+    head = bytes([msg_id & 0xFF, total & 0xFF, check_seq & 0xFF])
+    return head + struct.pack(">H", check & 0xFFFF) + bytes(s & 0xFF for s in seqs)
+
+
+def parse_retrieve(body: bytes) -> Retrieve | None:
+    if len(body) < 5:
+        return None
+    return Retrieve(msg_id=body[0], total=body[1], check_seq=body[2],
+                    check=struct.unpack_from(">H", body, 3)[0], seqs=list(body[5:]))
+
+
 @dataclass
 class _Partial:
     total: int
@@ -261,16 +414,21 @@ class _Partial:
     repairs: int = 0
     fragment_size: int = 0
     highest: int = -1
+    # Asked for by number (see Reassembler.expect): done once these are in,
+    # rather than all `total`, most of which this radio already holds.
+    wanted: frozenset = frozenset()
 
     @property
     def size(self) -> int:
         """What each fragment but the last carries."""
         if self.fragment_size:
             return self.fragment_size
-        return VOICE_CHUNK if self.type == VOICE else 0
+        return VOICE_CHUNK if self.type in (VOICE, RESENT) else 0
 
     @property
     def complete(self) -> bool:
+        if self.wanted:
+            return self.wanted.issubset(self.chunks)
         return len(self.chunks) == self.total
 
     @property
@@ -296,6 +454,7 @@ class Message:
     # body keeps a zero-filled space for it, so everything after it is
     # still where it belongs.
     fragment_size: int = 0
+    total: int = 1
 
     @property
     def complete(self) -> bool:
@@ -329,6 +488,8 @@ class Reassembler:
 
     def push(self, packet: Packet) -> Message | None:
         if packet.total == 1:
+            # Asked for, or not: a one-fragment message is whole on arrival.
+            self._partials.pop((packet.src, packet.msg_id, packet.type), None)
             return Message(
                 type=packet.type, src=packet.src, msg_id=packet.msg_id,
                 body=packet.body, flags=packet.flags, missing=[],
@@ -352,11 +513,17 @@ class Reassembler:
         if packet.seq in partial.chunks:
             return None  # a repeat of one we have, sent for someone else
         partial.chunks[packet.seq] = packet.body
+        # The sender's word, over whatever an expectation guessed (the
+        # codec mode of a message asked for without ever having seen it).
+        partial.flags, partial.dst = packet.flags, packet.dst
         if packet.seq < packet.total - 1:
             partial.fragment_size = len(packet.body)
         partial.last_seen = now
         partial.highest = max(partial.highest, packet.seq)
-        still_coming = max(0, partial.total - 1 - partial.highest)
+        if partial.wanted:
+            still_coming = len(partial.wanted.difference(partial.chunks))
+        else:
+            still_coming = max(0, partial.total - 1 - partial.highest)
         # Mid-repair, keep waiting for the rest of what was asked for.
         partial.deadline = max(partial.deadline, now + QUIET_SECONDS
                                + still_coming * self.fragment_seconds)
@@ -384,6 +551,23 @@ class Reassembler:
         now = time.monotonic() if now is None else now
         return [(key, partial) for key, partial in self._partials.items()
                 if now >= partial.deadline]
+
+    def expect(self, key, total: int, wanted=(), flags: int = 0,
+               fragment_size: int = 0, seconds: float = 0.0):
+        """Wait for fragments asked for again, for `seconds` at most.
+
+        `key` is (src, msg_id, type). With `wanted` the message is done when
+        those have arrived; without, when all `total` have. Either way it
+        is delivered at the deadline, with whatever did arrive, so an
+        unanswered request still ends.
+        """
+        now = time.monotonic()
+        self._done.pop(key, None)
+        wanted = frozenset(s for s in wanted if 0 <= s < total)
+        self._partials[key] = _Partial(
+            total=total, flags=flags, src=key[0], type=key[2], started=now,
+            fragment_size=fragment_size, last_seen=now, deadline=now + seconds,
+            wanted=wanted, repairs=REPAIR_ROUNDS)
 
     def postpone(self, key, seconds: float):
         partial = self._partials.get(key)
@@ -420,4 +604,5 @@ class Reassembler:
             flags=partial.flags, missing=partial.missing,
             rssi_dbm=partial.best_rssi, received_at=time.time(),
             dst=partial.dst, channel=partial.channel, fragment_size=size,
+            total=partial.total,
         )

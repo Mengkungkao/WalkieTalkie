@@ -101,6 +101,11 @@ class Deframer:
         low, high = cls.RSSI_BYTE_RANGE
         return byte is not None and low <= byte <= high
 
+    @property
+    def buffered(self) -> int:
+        """Bytes held back, waiting to complete a frame."""
+        return len(self._buffer)
+
     def feed(self, data: bytes) -> list:
         self._buffer.extend(data)
         if len(self._buffer) > self.MAX_BUFFER:

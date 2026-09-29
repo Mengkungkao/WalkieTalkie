@@ -37,7 +37,7 @@ log = get_logger("sx126x")
 
 UART_BAUD = {1200: 0x00, 2400: 0x20, 4800: 0x40, 9600: 0x60,
              19200: 0x80, 38400: 0xA0, 57600: 0xC0, 115200: 0xE0}
-AIR_SPEED = {1200: 0x01, 2400: 0x02, 4800: 0x03, 9600: 0x04,
+AIR_SPEED = {300: 0x00, 1200: 0x01, 2400: 0x02, 4800: 0x03, 9600: 0x04,
              19200: 0x05, 38400: 0x06, 62500: 0x07}
 POWER_DBM = {22: 0x00, 17: 0x01, 13: 0x02, 10: 0x03}
 BUFFER_SIZE = {240: 0x00, 128: 0x40, 64: 0x80, 32: 0xC0}
@@ -179,8 +179,13 @@ class SX126x:
                 self.port, reason)
             return True
 
-    # --- mode pins (only when rewired off 22/27) -----------------------
+    # --- mode pins (provisioning, or when rewired off 22/27) -------------
     def _setup_gpio(self):
+        if hasattr(self.mode_pins, "set"):
+            # Already-held lines (modelines.ModeLines): what provisioning
+            # uses, on either board.
+            self._gpio = self.mode_pins
+            return
         import RPi.GPIO as GPIO  # imported lazily: absent off-device
 
         self._gpio = GPIO
@@ -192,8 +197,11 @@ class SX126x:
     def set_mode(self, m0: int, m1: int):
         if not self._gpio:
             return
-        self._gpio.output(self.mode_pins[0], m0)
-        self._gpio.output(self.mode_pins[1], m1)
+        if self._gpio is self.mode_pins:
+            self._gpio.set(m0, m1)
+        else:
+            self._gpio.output(self.mode_pins[0], m0)
+            self._gpio.output(self.mode_pins[1], m1)
         time.sleep(0.05)
 
     # --- transmit ------------------------------------------------------
@@ -236,6 +244,26 @@ class SX126x:
             self._recover(ser, exc)
             return b""
 
+    def read_pending(self, wait: float) -> bytes:
+        """Whatever arrives within `wait` seconds; b"" if nothing does.
+
+        For the byte the module sends just after a packet -- its signal
+        strength -- which is often a millisecond behind the packet and so
+        misses the read that completed it.
+        """
+        ser = self.ser
+        deadline = time.monotonic() + wait
+        try:
+            while True:
+                waiting = ser.in_waiting
+                if waiting:
+                    return ser.read(waiting)
+                if time.monotonic() >= deadline:
+                    return b""
+                time.sleep(0.002)
+        except (serial.SerialException, OSError, TypeError):
+            return b""
+
     def wake_reader(self):
         """Unblock a thread parked in `read_blocking` so it can exit."""
         try:
@@ -252,7 +280,10 @@ class SX126x:
             pass
         if self._gpio:
             try:
-                self._gpio.cleanup(list(self.mode_pins))
+                if self._gpio is self.mode_pins:
+                    self._gpio.close()
+                else:
+                    self._gpio.cleanup(list(self.mode_pins))
             except Exception:
                 pass
 

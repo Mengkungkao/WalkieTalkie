@@ -8,6 +8,7 @@
 #   ./install-raspberrypi.sh --yes         accept every prompt (unattended)
 #   ./install-raspberrypi.sh --check       report only; change nothing
 #   ./install-raspberrypi.sh --frequency 915   provision the module for another band
+#   ./install-raspberrypi.sh --range long      provision for range (2.4k air; every radio)
 #
 # Steps that need a reboot say so and stop rather than pretending to have
 # worked. Run it again afterwards; it is safe to re-run and skips
@@ -105,32 +106,7 @@ register_with_daemon
 
 # ------------------------------------------------------------ 7. provision
 step "Provisioning the radio module"
-if [ "$NEED_REBOOT" = 1 ]; then
-    warn "skipped: reboot first so the UART comes up"
-elif [ ! -e "$PORT" ]; then
-    warn "skipped: no $PORT"
-else
-    ADDR_ARG=(); [ -n "$ADDRESS" ] && ADDR_ARG=(--address "$ADDRESS")
-    FREQ_ARG=(); [ -n "$FREQUENCY" ] && FREQ_ARG=(--frequency "$FREQUENCY")
-    info "This writes frequency and air rate into the module's non-volatile"
-    info "registers, once per module; the Device ID is the app's business."
-    info "It needs GPIO 22/27 for a few seconds, so the display daemon is"
-    info "stopped and restarted around it."
-    if ask "provision the module now?"; then
-        sudo systemctl stop whisplay-daemon 2>/dev/null || true
-        sleep 1
-        if python3 provision_radio.py "${ADDR_ARG[@]}" "${FREQ_ARG[@]}" 2>&1 | sed 's/^/         /'; then
-            ok "module provisioned"
-        else
-            bad "provisioning failed -- check the HAT is seated and powered"
-        fi
-        sudo systemctl start whisplay-daemon 2>/dev/null || true
-    else
-        info "later:  sudo systemctl stop whisplay-daemon"
-        info "        python3 provision_radio.py --frequency 868"
-        info "        sudo systemctl start whisplay-daemon"
-    fi
-fi
+provision_module "$PORT"
 
 # ----------------------------------------------------------------- 8. test
 step "Self-test"

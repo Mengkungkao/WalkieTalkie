@@ -15,15 +15,23 @@ radio:
   # under Settings > Privacy channel.
   privacy_channel: 1
   frequency_mhz: 868
-  # Air rate, not UART rate. Higher is faster but shorter-ranged; 9600
-  # keeps a ~1 km line-of-sight link while sending a 10 s voice message
-  # in about two seconds of airtime.
+  # Air rate, not UART rate. Lower reaches further but takes longer per
+  # message: 2400 hears about 6 dB weaker signals than 9600 (roughly twice
+  # the distance in the open), and a voice message takes four times the
+  # airtime. It must match the module: change it with
+  #   sudo python3 provision_radio.py --range long
+  # on every radio, which writes the module and this line together.
   air_speed: 9600
   power_dbm: 22
   uart_baud: 9600
   # ETSI caps EU 868 at 1% duty cycle: 36 seconds of transmit per hour.
   # The app enforces it. Set 100 only where you are licensed to.
   duty_cycle_percent: 1.0
+  # Paired radios ping each other this often so each shows whether the
+  # other is in range (Start > To a paired device). 0 turns it off.
+  link_check_seconds: 120
+  # Home > Range test sends a probe this often.
+  range_test_seconds: 30
   # M0/M1. Leave null: GPIO 22 and 27 belong to the Whisplay LCD, and
   # the module is configured once by provision_radio.py instead. Fill in
   # [m0, m1] only if you rewired the mode pins to free GPIOs.

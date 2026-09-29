@@ -1,48 +1,63 @@
 #!/usr/bin/env python3
 """One-shot: write the LoRa module's persistent configuration.
 
-Run this once per radio, before the app is used, and then not again.
-Every module gets the same frequency and air rate. The address written
-here no longer matters: the app addresses packets itself (protocol v2),
-and each radio's Device ID is set in the app, by pairing or in Settings.
+Every module on the channel must hold the same frequency and air rate,
+or they cannot hear each other at all. The address written here no
+longer matters: the app addresses packets itself, and each radio's
+Device ID is set in the app, by pairing or in Settings.
 
-**Why it is separate from the app.** Setting the module's frequency,
-address and air rate requires driving M0/M1 -- GPIO 22 and 27 -- into
-config mode. On this build those two pins belong to the Whisplay
-daemon, which uses them for the LCD. The app therefore never touches
-GPIO: it relies on the module already holding the right settings.
+    sudo python3 provision_radio.py --check          read what the module holds
+    sudo python3 provision_radio.py --range long     2.4k: about twice the range
+    sudo python3 provision_radio.py --range normal   9.6k: the default
 
-That works because this tool writes register header 0xC0, which the
-module stores in **non-volatile** memory. The stock Waveshare driver
-writes 0xC2 instead, which is lost at power-off and is why it has to
-reconfigure -- and grab the mode pins -- at every start.
+**Range.** A lower air rate hears weaker signals: 2.4k about 6 dB
+further down than 9.6k, which is roughly twice the distance in the open
+and one more wall or hill in town. It costs airtime -- four times as
+much per message -- and so, under the 1% duty cycle, messages per hour.
+Change every radio, one after the other; until both are done they
+cannot hear each other.
 
-So this script stops the daemon for a few seconds, borrows the pins,
-writes the settings, reads them back, and restarts the daemon:
+**Why it is separate from the app.** Writing the module's settings means
+holding M1 high, and M0/M1 are header pins 15 and 13 -- which the
+Whisplay HAT uses for its backlight and data/command lines. So this
+stops the Whisplay daemon for a few seconds, takes the two lines,
+writes the settings (register header 0xC0: kept through power-off),
+reads them back, and starts the daemon again. That needs root, hence
+sudo. Then it writes the air rate into config.yaml too, because the app
+paces its packets and counts its airtime from that number.
 
-    sudo systemctl stop whisplay-daemon
-    python3 provision_radio.py --address 5 --frequency 868
-    sudo systemctl start whisplay-daemon
-
-Use --check on its own to read back what a module currently holds
-without changing anything.
-
-Raspberry Pi only, for now: the mode pins are driven through RPi.GPIO.
-On an Orange Pi, provision the HAT on a Pi and move it across -- the
-settings live in the module.
+Works on a Raspberry Pi and on an Orange Pi Zero 2W, through libgpiod.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 
-from app.config import settings as settings_module
-from app.radio.sx126x import (AIR_SPEED, POWER_DBM, SX126x, describe_settings)
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+from app.config import settings as settings_module  # noqa: E402
+from app.radio import modelines  # noqa: E402
+from app.radio.sx126x import (AIR_SPEED, POWER_DBM, SX126x,  # noqa: E402
+                              describe_settings)
 
 DAEMON = "whisplay-daemon"
-DEFAULT_MODE_PINS = (22, 27)
+CONFIG = HERE / "config.yaml"
+
+# --range: air rate, and what it is for.
+RANGES = {
+    "normal": (9600, "the default: a 10 s voice message in ~7 s of airtime"),
+    "long": (2400, "~6 dB more reach (about twice the distance in the open); "
+                   "4x the airtime per message"),
+    "longest": (1200, "~9 dB more reach; 8x the airtime -- short messages only"),
+}
 
 
 def daemon_running() -> bool:
@@ -54,101 +69,147 @@ def daemon_running() -> bool:
         return False
 
 
-def gpio_conflict(pins=DEFAULT_MODE_PINS) -> str | None:
-    """Name whoever currently holds M0/M1, so the error is actionable."""
+def systemctl(action: str) -> bool:
     try:
-        output = subprocess.run(["gpioinfo"], capture_output=True, text=True,
-                                timeout=5).stdout
+        return subprocess.run(["systemctl", action, DAEMON], timeout=30).returncode == 0
     except (OSError, subprocess.SubprocessError):
-        return None
-    for line in output.splitlines():
-        for pin in pins:
-            if f'line  {pin:2d}:' in line and "consumer=" in line:
-                consumer = line.split('consumer="')[-1].split('"')[0]
-                if consumer and consumer != "unused":
-                    return f"GPIO {pin} is held by {consumer!r}"
-    return None
+        return False
 
 
-def mode_pin_driver_missing() -> str | None:
-    """Why M0/M1 cannot be driven on this board, or None if they can.
+def quit_app(wait: float = 5.0) -> bool:
+    """Ask a running walkie app to quit: it holds the serial port.
 
-    Checked up front because the failure otherwise surfaces from inside
-    SX126x as "cannot open /dev/ttyS0: No module named 'RPi'", followed
-    by UART advice -- which sends an Orange Pi user after the wrong thing.
+    Two programs reading one port each get half the bytes, so the module's
+    replies would arrive torn. True once no app is left running.
     """
+    pattern = "[p]ython3 -m app.main"
     try:
-        import RPi.GPIO  # noqa: F401 -- RuntimeError on a non-Pi board
-    except (ImportError, RuntimeError) as exc:
-        return str(exc)
-    return None
+        found = subprocess.run(["pgrep", "-f", pattern], capture_output=True,
+                               text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if not found:
+        return True
+    print("quitting the walkie app (it holds the serial port)")
+    subprocess.run(["pkill", "-TERM", "-f", pattern], timeout=5)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if subprocess.run(["pgrep", "-f", pattern], capture_output=True,
+                          timeout=5).returncode != 0:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def write_config(path: Path, air_speed: int, power: int) -> bool:
+    """Put the module's air rate and power into config.yaml, keeping the
+    rest -- comments and all -- as it was. Written in place, so the file
+    keeps its owner when this runs as root."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return False
+    new = re.sub(r"(?m)^(\s*air_speed:\s*)\d+", rf"\g<1>{air_speed}", text, count=1)
+    new = re.sub(r"(?m)^(\s*power_dbm:\s*)\d+", rf"\g<1>{power}", new, count=1)
+    if "air_speed:" not in new:
+        new = re.sub(r"(?m)^radio:\s*$", f"radio:\n  air_speed: {air_speed}", new, count=1)
+    if new == text:
+        return True
+    with open(path, "r+") as handle:
+        handle.seek(0)
+        handle.write(new)
+        handle.truncate()
+    return True
 
 
 def main() -> int:
-    defaults = settings_module.load().radio
+    # Settings are read for their defaults only; nothing of this run belongs
+    # in the operator's data directory -- least of all files owned by root.
+    with tempfile.TemporaryDirectory(prefix="walkie-provision-") as scratch:
+        os.environ.setdefault("WALKIE_DATA_DIR", scratch)
+        defaults = settings_module.load().radio
+    return provision(defaults)
+
+
+def provision(defaults) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--port", default=defaults.port)
-    parser.add_argument("--address", type=int, default=defaults.address,
-                        help="the module's own address, 0-65534; since protocol "
-                             "v2 the app ignores it, so any value works")
+    parser.add_argument("--address", type=int, default=defaults.address or 0,
+                        help="the module's own address; the app ignores it")
     parser.add_argument("--frequency", type=int, default=defaults.frequency_mhz,
                         help="MHz, 850-930 or 410-493")
-    parser.add_argument("--air-speed", type=int, default=defaults.air_speed,
-                        choices=sorted(AIR_SPEED))
+    parser.add_argument("--range", choices=sorted(RANGES), dest="range_name",
+                        help="; ".join(f"{k}: {v[0]} bps, {v[1]}" for k, v in RANGES.items()))
+    parser.add_argument("--air-speed", type=int, choices=sorted(AIR_SPEED),
+                        help="an air rate in bps, instead of --range")
     parser.add_argument("--power", type=int, default=defaults.power_dbm,
                         choices=sorted(POWER_DBM))
     parser.add_argument("--net-id", type=int, default=0)
-    # Default to whatever config.yaml says, so a rewired HAT does not need
-    # the pins repeated on every command -- and, more importantly, so this
-    # tool cannot drive GPIO 22/27 into the LCD after M0/M1 have been moved
-    # off them.
-    configured = defaults.mode_pins or DEFAULT_MODE_PINS
-    parser.add_argument("--m0", type=int, default=int(configured[0]))
-    parser.add_argument("--m1", type=int, default=int(configured[1]))
+    parser.add_argument("--chip", help="gpiochip of M0/M1 (detected from the board)")
+    parser.add_argument("--m0", type=int, help="M0's line on that chip")
+    parser.add_argument("--m1", type=int, help="M1's line on that chip")
     parser.add_argument("--check", action="store_true",
                         help="read the current settings and exit")
-    parser.add_argument("--force", action="store_true",
-                        help="proceed even if the mode pins look busy")
+    parser.add_argument("--no-config", action="store_true",
+                        help="leave config.yaml alone")
     args = parser.parse_args()
 
-    missing = mode_pin_driver_missing()
-    if missing:
-        print(f"! cannot drive M0/M1 on this board ({missing}).", file=sys.stderr)
-        print("  Provisioning needs RPi.GPIO, which only runs on a Raspberry Pi.",
-              file=sys.stderr)
-        print("  Provision this LoRa HAT on a Pi; the settings are stored in the",
-              file=sys.stderr)
-        print("  module and move with it.", file=sys.stderr)
+    air_speed = args.air_speed or (RANGES[args.range_name][0] if args.range_name
+                                   else defaults.air_speed)
+    if air_speed not in AIR_SPEED:
+        print(f"! {air_speed} bps is not an air rate the module has", file=sys.stderr)
         return 2
 
-    moved =tuple(defaults.mode_pins or ()) not in ((), tuple(DEFAULT_MODE_PINS))
-    if moved:
-        print(f"using mode pins from config.yaml: M0=GPIO{args.m0} M1=GPIO{args.m1}")
+    lines = modelines.board_lines()
+    if args.chip or args.m0 is not None or args.m1 is not None:
+        base = lines or modelines.Lines("custom", "/dev/gpiochip0", 22, 27)
+        lines = modelines.Lines("custom", args.chip or base.chip,
+                                base.m0 if args.m0 is None else args.m0,
+                                base.m1 if args.m1 is None else args.m1)
+    if lines is None:
+        print("! this board is not one whose M0/M1 lines are known; give them with "
+              "--chip, --m0 and --m1", file=sys.stderr)
+        return 2
+    print(f"{lines.board}: M0 = {lines.chip} line {lines.m0}, M1 = line {lines.m1}")
 
-    if daemon_running() and not moved:
-        print(f"! {DAEMON} is running and owns GPIO {args.m0}/{args.m1}.",
-              file=sys.stderr)
-        print(f"  Stop it first:  sudo systemctl stop {DAEMON}", file=sys.stderr)
-        if not args.force:
+    restart = daemon_running()
+    if restart:
+        if os.geteuid() != 0:
+            print(f"! {DAEMON} holds M0/M1 (they are the LCD's lines too). Run this "
+                  "with sudo, and it stops the daemon for a few seconds:",
+                  file=sys.stderr)
+            print(f"    sudo python3 {Path(sys.argv[0]).name} "
+                  + " ".join(sys.argv[1:]), file=sys.stderr)
             return 2
+        print(f"stopping {DAEMON} (the screen goes dark for a few seconds)")
+        if not systemctl("stop"):
+            print(f"! could not stop {DAEMON}", file=sys.stderr)
+            return 1
+        time.sleep(1.0)
 
-    conflict = None if moved else gpio_conflict()
-    if conflict and not args.force:
-        print(f"! {conflict}. Stop that process, or pass --force.", file=sys.stderr)
-        return 2
-
+    radio = None
     try:
-        radio = SX126x(port=args.port, addr=args.address, freq_mhz=args.frequency,
-                       uart_baud=9600, mode_pins=(args.m0, args.m1),
-                       read_timeout=1.0)
-    except Exception as exc:
-        print(f"! cannot open {args.port}: {exc}", file=sys.stderr)
-        print("  Check that enable_uart=1 is applied and that no getty holds the",
-              file=sys.stderr)
-        print("  port:  fuser -v /dev/ttyS0", file=sys.stderr)
-        return 1
+        if not quit_app():
+            print("! the walkie app did not quit; close it (four clicks) and "
+                  "try again", file=sys.stderr)
+            return 1
+        try:
+            pins = modelines.ModeLines(lines)
+        except Exception as exc:
+            print(f"! cannot take M0/M1: {exc}", file=sys.stderr)
+            print("  Something else still holds them; is the walkie app running "
+                  "outside the daemon?", file=sys.stderr)
+            return 1
+        try:
+            radio = SX126x(port=args.port, addr=args.address, freq_mhz=args.frequency,
+                           uart_baud=9600, mode_pins=pins, read_timeout=1.0)
+        except Exception as exc:
+            pins.close()
+            print(f"! cannot open {args.port}: {exc}", file=sys.stderr)
+            print("  Is the walkie app still running? It holds the port: quit it "
+                  "(four clicks) and try again.", file=sys.stderr)
+            return 1
 
-    try:
         if args.check:
             reg = radio.read_settings()
             if reg is None:
@@ -160,27 +221,34 @@ def main() -> int:
                 print(f"  {key:<20} {value}")
             return 0
 
-        print(f"writing: address={args.address} freq={args.frequency}MHz "
-              f"air={args.air_speed}bps power={args.power}dBm (persistent)")
-        ok = radio.configure(
-            addr=args.address, freq_mhz=args.frequency, air_speed=args.air_speed,
-            power=args.power, net_id=args.net_id, rssi=True, persist=True,
-        )
+        print(f"writing: freq={args.frequency} MHz air={air_speed} bps "
+              f"power={args.power} dBm (kept through power-off)")
+        ok = radio.configure(addr=args.address, freq_mhz=args.frequency,
+                             air_speed=air_speed, power=args.power,
+                             net_id=args.net_id, rssi=True, persist=True)
         if not ok:
             print("! the module did not acknowledge the write", file=sys.stderr)
             return 1
-
         reg = radio.read_settings()
-        if reg is None:
-            print("  written, but read-back failed", file=sys.stderr)
-            return 0
-        print("read back:")
-        for key, value in describe_settings(reg).items():
-            print(f"  {key:<20} {value}")
-        print(f"\nDone. Restart the display:  sudo systemctl start {DAEMON}")
+        if reg is not None:
+            print("read back:")
+            for key, value in describe_settings(reg).items():
+                print(f"  {key:<20} {value}")
+        if not args.no_config:
+            if write_config(CONFIG, air_speed, args.power):
+                print(f"config.yaml: air_speed {air_speed}, power_dbm {args.power}")
+            else:
+                print(f"! set air_speed: {air_speed} in {CONFIG} by hand -- the app "
+                      "paces its packets by it", file=sys.stderr)
+        print("\nDone. Do the same on every other radio: until they match, they "
+              "cannot hear each other.")
         return 0
     finally:
-        radio.close()
+        if radio is not None:
+            radio.close()
+        if restart:
+            print(f"starting {DAEMON}; open the walkie app from its menu again")
+            systemctl("start")
 
 
 if __name__ == "__main__":

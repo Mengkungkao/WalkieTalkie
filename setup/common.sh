@@ -14,6 +14,7 @@ ASSUME_YES=0
 CHECK_ONLY=0
 ADDRESS=""
 FREQUENCY=""
+RANGE=""
 NEED_REBOOT=0
 FAILURES=0
 STEP=0
@@ -29,6 +30,7 @@ while [ $# -gt 0 ]; do
         -n|--check)   CHECK_ONLY=1 ;;
         --address)    ADDRESS="$2"; shift ;;
         --frequency)  FREQUENCY="$2"; shift ;;
+        --range)      RANGE="$2"; shift ;;
         -h|--help)    usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -249,6 +251,42 @@ register_with_daemon() {
 }
 
 # ---------------------------------------------------------------- test
+provision_module() {
+    # provision_module PORT -- write frequency and air rate into the module.
+    # provision_radio.py stops whisplay-daemon (it holds M0/M1, which are
+    # the LCD's lines too), takes the lines through libgpiod on either
+    # board, and starts the daemon again.
+    local port="$1"
+    if [ "$NEED_REBOOT" = 1 ]; then
+        warn "skipped: reboot first so the UART comes up"
+        return
+    elif [ ! -e "$port" ]; then
+        warn "skipped: no $port"
+        return
+    fi
+    local args=()
+    [ -n "$ADDRESS" ] && args+=(--address "$ADDRESS")
+    [ -n "$FREQUENCY" ] && args+=(--frequency "$FREQUENCY")
+    [ -n "$RANGE" ] && args+=(--range "$RANGE")
+    info "This writes frequency and air rate into the module's non-volatile"
+    info "registers; every radio needs the same. The Device ID is the app's"
+    info "business. The screen goes dark for a few seconds while it runs."
+    [ -n "$RANGE" ] && info "Range: $RANGE -- do the same on every other radio."
+    if [ "$CHECK_ONLY" = 1 ]; then
+        info "(check only: run  sudo python3 provision_radio.py --check  to read it)"
+        return
+    fi
+    if ask "provision the module now?"; then
+        if sudo python3 provision_radio.py "${args[@]}" 2>&1 | sed 's/^/         /'; then
+            ok "module provisioned"
+        else
+            bad "provisioning failed -- check the HAT is seated and powered"
+        fi
+    else
+        info "later:  sudo python3 provision_radio.py ${args[*]}"
+    fi
+}
+
 run_selftest() {
     if python3 -m pytest tests -q >/tmp/walkie-tests.log 2>&1; then
         ok "$(tail -1 /tmp/walkie-tests.log)"

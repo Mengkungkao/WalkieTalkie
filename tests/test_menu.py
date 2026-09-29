@@ -60,7 +60,7 @@ def go_to(app, key):
 def test_the_app_opens_on_home(radio):
     assert radio.state.screen == HOME
     assert [i["key"] for i in radio.state.home_items] == \
-        ["start", "receive", "pair", "settings"]
+        ["start", "receive", "pair", "settings", "range"]
 
 
 def test_start_offers_all_and_a_paired_device(radio):

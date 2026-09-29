@@ -36,11 +36,13 @@ from app.audio.playback import CUE_ERROR, Player, cues_for, voice_for
 from app.config import settings as settings_module
 from app.config.settings import Contact
 from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE, GestureDetector
-from app.radio import protocol
+from app.radio import linkcheck, protocol
 from app.radio import modepins
 from app.config.settings import hostname_callsign
 from app.radio.link import LoraLink, NotPaired
+from app.radio.linkcheck import DISCONNECTED, IN_RANGE, UNKNOWN, WEAK, LinkMonitor
 from app.radio.sx126x import SX126x, port_conflicts
+from app.rangetest import RangeTest
 from app.store.inbox import Inbox
 from app.store.keyring import Keyring
 from app.store.overrides import Overrides
@@ -50,8 +52,8 @@ from app.ui.display import Display
 from app.ui.editors import (ChoiceEditor, ClockEditor, ConfirmEditor,
                             DigitEditor)
 from app.ui.screens import (CONTACTS, EDIT, HOME, IDLE, INBOX, PAIR, PLAYING,
-                            RECEIVING, RECORDING, SENDING, SETTINGS, START,
-                            STATUS, TALK, ViewState)
+                            RANGE, RECEIVING, RECORDING, SENDING, SETTINGS,
+                            START, STATUS, TALK, ViewState)
 from app.utils import battery, clock
 from app.utils.logger import get_logger
 from app.utils.single_instance import AlreadyRunning, SingleInstance
@@ -84,6 +86,20 @@ PAIR_ANSWER_SECONDS = 30.0
 # At most one reply a radio that is not pairing sends to a clashing one.
 CLASH_REPLY_SECONDS = 10.0
 
+# The link check (see app.radio.linkcheck). The first goes out soon after
+# start, so the paired list fills in without waiting a whole interval.
+FIRST_CHECK_SECONDS = 8.0
+# Checks stop while less than this share of the hour's airtime is left:
+# the budget is for talking, and a check can wait.
+CHECK_RESERVE = 0.25
+# A radio heard this recently needs no probe when its Talk page opens.
+FRESH_SECONDS = 60.0
+# Pings list the voice messages sent this long ago or less, so a radio
+# that was out of range when one went can ask for it once back.
+RECENT_SECONDS = 30 * 60
+# How often a missed or broken message is asked for, at most.
+MAX_FETCHES = 2
+
 # Settings > Voice quality: Codec2 modes, clearest first. Scored with STOI
 # (0-1, intelligibility) on recorded speech through the whole path:
 # 3200 0.866, 1600 0.83, 700C 0.73.
@@ -112,6 +128,16 @@ class WalkieApp:
     _last_clash_reply = -CLASH_REPLY_SECONDS
     _return_screen = SETTINGS
     _warned_config_mode = False
+    monitor = None
+    range_test = None
+    _check_due = float("inf")
+    _ping_seq = 0
+    # src -> when an outstanding request for a message again gives up.
+    _retrieving = None
+    # (src, msg_id, total) -> times a missed message was asked for.
+    _fetch_tries = None
+    # Inbox item ids the operator asked to hear once they are whole.
+    _play_when_fetched = None
 
     def __init__(self, settings):
         self.settings = settings
@@ -197,6 +223,9 @@ class WalkieApp:
         # Before the radio opens: a request can arrive the moment it does.
         self._pending_pair = None
         self._parents = {}
+        self.monitor = LinkMonitor(settings.radio.link_check_seconds)
+        self._fetch_state()
+        self._check_due = time.monotonic() + FIRST_CHECK_SECONDS
         self._open_radio()
 
         self._playback_lock = threading.Lock()
@@ -273,6 +302,7 @@ class WalkieApp:
         self.link.on_tx_progress(self._on_tx_progress)
         self.link.on_hello(self._on_hello)
         self.link.on_clash(self._on_clash)
+        self.link.on_retrieve(self._on_retrieve)
         self.link.start()
 
     def _refresh_audio_state(self):
@@ -304,6 +334,19 @@ class WalkieApp:
         self.state.target_address = addr
         self.state.target_name = entry.name if entry else name
         self.state.target_heard = entry.status if entry else ""
+        if self.monitor is not None:
+            self.monitor.watch(self._paired_addresses(), time.monotonic())
+
+    def _paired_addresses(self) -> list:
+        """Contacts we hold keys for: the radios the link check watches."""
+        if self.keyring is None:
+            return []
+        contacts = {c.address for c in self.settings.contacts}
+        return [addr for addr in self.keyring.paired if addr in contacts]
+
+    def _name_of(self, addr: int) -> str:
+        entry = self.roster.entry(addr)
+        return entry.name if entry else f"node {addr}"
 
     # --- board callbacks -----------------------------------------------
     def _on_foreground(self):
@@ -381,6 +424,8 @@ class WalkieApp:
             navigation.OPEN_SETTING: self._open_setting,
             navigation.NEXT_FOUND: self._next_found,
             navigation.PAIR_SELECTED: self._pair_selected,
+            navigation.MARK_SPOT: self._mark_spot,
+            navigation.PROBE_NOW: self._probe_now,
             navigation.GO_BACK: self._go_back,
         }
 
@@ -396,7 +441,10 @@ class WalkieApp:
 
     def _go_back(self):
         parents = self._parents or {}
+        leaving = self.state.screen
         self.state.screen = parents.get(self.state.screen, HOME)
+        if leaving == RANGE:
+            self._stop_range_test()
         if self.state.screen == SETTINGS:
             self._refresh_settings()
 
@@ -412,10 +460,25 @@ class WalkieApp:
              "value": (f"{unread} new  ·  {total} in all" if unread
                        else f"nothing new  ·  listening on ch {self.state.channel}")},
             {"key": "pair", "label": "Pair devices",
-             "value": f"{paired} paired  ·  add another radio"},
+             "value": f"{paired} paired  ·  {self._reach_summary()}" if paired
+             else "none yet  ·  add another radio"},
             {"key": "settings", "label": "Settings",
              "value": "name, ID, privacy channel"},
+            # Temporary, for testing at distance; see app.rangetest.
+            {"key": "range", "label": "Range test",
+             "value": "probe a paired radio, log the signal"},
         ]
+
+    def _reach_summary(self) -> str:
+        """"Jarvis in range", or "1 of 3 in range": the paired radios now."""
+        statuses = self.state.link_status or {}
+        if not statuses:
+            return "add another radio"
+        reachable = [a for a, (s, _d) in statuses.items() if s in (IN_RANGE, WEAK)]
+        if len(statuses) == 1:
+            addr, (reach, _detail) = next(iter(statuses.items()))
+            return f"{self._name_of(addr)} {reach}"
+        return f"{len(reachable)} of {len(statuses)} in range"
 
     def _start_items(self) -> list:
         paired = len([e for e in self.roster.entries()
@@ -441,7 +504,8 @@ class WalkieApp:
         if self.state.screen == HOME:
             key = self.state.home_items[self.state.home_index % len(self.state.home_items)]["key"]
             {"start": lambda: self._show(START), "receive": self._open_inbox,
-             "pair": self._start_pairing, "settings": self._open_settings}[key]()
+             "pair": self._start_pairing, "settings": self._open_settings,
+             "range": self._start_range_test}[key]()
         elif self.state.screen == START:
             key = self.state.start_items[self.state.start_index % len(self.state.start_items)]["key"]
             if key == "all":
@@ -457,6 +521,7 @@ class WalkieApp:
         self._target = (addr, name)
         self._refresh_entries()
         self._call(addr)
+        self._check_before_talking(addr)
         self._show(TALK)
 
     def _can_reach(self, addr: int, name: str) -> bool:
@@ -830,6 +895,8 @@ class WalkieApp:
         self._refresh_menus()
         self.state.flash(f"paired with {name}", 4.0)
         log.info("pairing: paired with %s (%d)", name, addr)
+        # Start watching it now rather than at the next regular check.
+        self._check_due = min(self._check_due, time.monotonic() + 3.0)
 
     def _refresh_pair_view(self):
         # Discovery order, not signal or recency: re-sorting on every
@@ -1011,6 +1078,9 @@ class WalkieApp:
 
     def _apply_reset(self):
         log.warning("resetting all app data at the operator's request")
+        self._stop_range_test()
+        if self.monitor is not None:
+            self.monitor = LinkMonitor(self.settings.radio.link_check_seconds)
         for item in list(self.inbox.items):
             if item.voice_file:
                 (self.inbox.voice_dir / item.voice_file).unlink(missing_ok=True)
@@ -1036,6 +1106,371 @@ class WalkieApp:
         self._refresh_entries()
         self._refresh_menus()
         self.state.flash("all data erased", 4.0)
+
+    # --- is each paired radio in range? ---------------------------------------
+    # Every radio pings all of its paired radios at once every couple of
+    # minutes (config.yaml: radio.link_check_seconds). See linkcheck for
+    # what the pings carry and how the states are worked out.
+    def _send_ping(self, dst: int, reply: bool) -> int | None:
+        if self.link is None:
+            return None
+        self._ping_seq = (self._ping_seq + 1) % 256
+        watched = self.monitor.peers if self.monitor is not None else {}
+        reports = {addr: link.down for addr, link in list(watched.items())
+                   if link.down is not None and dst in (addr, protocol.BROADCAST)}
+        recent = self._recent_sent() if dst == protocol.BROADCAST else []
+        body = protocol.ping_body(self._ping_seq, int(self.settings.radio.link_check_seconds),
+                                  reply, reports, recent)
+        try:
+            self.link.send_ping(dst, body)
+        except NotPaired:
+            return None
+        if reply and self.monitor is not None:
+            self.monitor.probe_sent(dst, self._ping_seq, time.monotonic())
+        return self._ping_seq
+
+    def _airtime_for_checks(self) -> bool:
+        """Is there airtime to spare for a check, leaving the rest for voice?"""
+        budget = self.link.budget
+        if budget.unlimited:
+            return True
+        return budget.remaining_seconds() >= CHECK_RESERVE * budget.limit_seconds
+
+    def _link_check_tick(self):
+        """The regular check. Called from the main loop."""
+        interval = self.settings.radio.link_check_seconds
+        now = time.monotonic()
+        if self.link is None or not interval or now < self._check_due:
+            return
+        self._check_due = now + interval
+        if self.range_test is not None or not self._paired_addresses():
+            return        # the range test's probes do this job while it runs
+        if self._radio_is_busy() or self.state.radio_state == RECORDING:
+            self._check_due = now + 10.0      # not over a message; soon, though
+            return
+        if not self._airtime_for_checks():
+            log.info("link check skipped: keeping the hour's airtime for voice")
+            return
+        self._send_ping(protocol.BROADCAST, reply=False)
+
+    def _probe(self, addr: int) -> int | None:
+        """Ask one radio to answer now: settles "is it there?" in a second."""
+        if self.link is None or not self.link.can_send(addr, protocol.PING):
+            return None
+        return self._send_ping(addr, reply=True)
+
+    def _check_before_talking(self, addr: int):
+        """Opening Talk on a radio not heard lately probes it first."""
+        if addr == protocol.BROADCAST or self.monitor is None or self.link is None:
+            return
+        link = self.monitor.peers.get(addr)
+        fresh = (link is not None and link.last_heard is not None
+                 and time.monotonic() - link.last_heard < FRESH_SECONDS)
+        if not fresh and self._airtime_for_checks():
+            self._probe(addr)
+
+    def _recent_sent(self) -> list:
+        """What our pings list: voice sent lately, with a fingerprint each."""
+        recent = []
+        for item in self.inbox.sent_since(time.time() - RECENT_SECONDS,
+                                          protocol.MAX_RECENT):
+            data = self.inbox.voice_bytes(item)
+            if data:
+                recent.append(protocol.Recent(
+                    item.msg_id, item.total,
+                    protocol.chunk_check(data, 0, item.fragment_size), item.dst))
+        return recent
+
+    def _on_ping(self, message):
+        ping = protocol.parse_ping(message.body)
+        if ping is None or self.monitor is None:
+            return
+        self.monitor.ping(message.src, ping, message.rssi_dbm,
+                          self.settings.radio.address, time.monotonic())
+        self._catch_up(message.src, ping.recent)
+
+    def _on_pong(self, message):
+        pong = protocol.parse_pong(message.body)
+        if pong is None or self.monitor is None:
+            return
+        seq, at_them, heard = pong
+        now = time.monotonic()
+        self.monitor.pong(message.src, seq, at_them, message.rssi_dbm, now)
+        test = self.range_test
+        if test is not None and message.src == test.peer:
+            test.answer(seq, message.rssi_dbm, at_them, heard, now)
+            self._refresh_range_view()
+
+    def _update_link_status(self):
+        """Fold the link check into the view; say so when a radio comes or goes."""
+        if self.monitor is None:
+            return
+        now = time.monotonic()
+        for addr, old, new in self.monitor.update(now):
+            name = self._name_of(addr)
+            log.info("link check: %s (%d) %s -> %s", name, addr, old, new)
+            if new == DISCONNECTED and old in (IN_RANGE, WEAK):
+                self.state.flash(f"{name} disconnected", 4.0)
+                if self.settings.audio.cues:
+                    self.player.cue(self.cues.error)
+            elif new in (IN_RANGE, WEAK) and old == DISCONNECTED:
+                self.state.flash(f"{name} back in range", 3.0)
+                if self.settings.audio.cues:
+                    self.player.cue(self.cues.tx_done)
+        unreadable = self.link.unreadable if self.link is not None else {}
+        status = {}
+        for addr in list(self.monitor.peers):
+            if addr in unreadable:
+                # Its packets arrive and fail to open: it was reset, or
+                # paired again elsewhere. Only pairing again fixes it.
+                status[addr] = ("keys changed", "keys changed: pair again")
+            else:
+                status[addr] = (self.monitor.state_of(addr, now),
+                                self.monitor.summary(addr, now))
+        self.state.link_status = status
+
+    # --- asking for a message again ----------------------------------------------
+    def _fetch_state(self):
+        if self._retrieving is None:
+            self._retrieving, self._fetch_tries, self._play_when_fetched = {}, {}, set()
+
+    def _retrieve(self, item, play_when_done: bool = False, quiet: bool = False) -> bool:
+        """Ask the sender for the fragments of `item` that never arrived."""
+        self._fetch_state()
+        if self.link is None or not item.can_retrieve:
+            return False
+        name = item.peer_name or f"node {item.src}"
+        if not self.link.can_send(item.src, protocol.RETRIEVE):
+            if not quiet:
+                self.state.flash(f"pair with {name} again to fetch it", 3.0)
+            return False
+        now = time.monotonic()
+        if self._retrieving.get(item.src, 0.0) > now:
+            if not quiet:
+                self.state.flash(f"already asking {name}")
+            return False
+        check_seq, check = self.inbox.held_check(item)
+        seconds = self.link.retrieve(
+            item.src, item.msg_id, item.total, wanted=item.missing,
+            check_seq=check_seq, check=check, flags=item.codec_mode,
+            fragment_size=item.fragment_size)
+        self._retrieving[item.src] = now + seconds + 2.0
+        item.retrieving = True
+        item.retrieve_tries += 1
+        self.inbox.save()
+        if play_when_done:
+            self._play_when_fetched.add(item.id)
+        if not quiet:
+            self.state.flash(f"asking {name} for the missing part", 3.0)
+        self._wake.set()
+        return True
+
+    def _catch_up(self, src: int, recent: list):
+        """A paired radio listed its recent messages: fetch what we lack.
+
+        One missed completely -- we were out of range when it went -- is
+        asked for whole; one that came with gaps, for the gaps. One at a
+        time per radio, and each only a couple of times, so a radio that
+        cannot answer is not asked forever.
+        """
+        self._fetch_state()
+        if self.link is None or self._retrieving.get(src, 0.0) > time.monotonic():
+            return
+        if not self.link.can_send(src, protocol.RETRIEVE):
+            return
+        me = self.settings.radio.address
+        for entry in recent:
+            if entry.dst not in (me, protocol.BROADCAST):
+                continue
+            item = self.inbox.find(src, entry.msg_id, entry.total)
+            if item is None:
+                key = (src, entry.msg_id, entry.total)
+                tries = self._fetch_tries.get(key, 0)
+                if tries >= MAX_FETCHES:
+                    continue
+                self._fetch_tries[key] = tries + 1
+                log.info("%d sent message %d while we were not listening; asking for it",
+                         src, entry.msg_id)
+                seconds = self.link.retrieve(src, entry.msg_id, entry.total, check_seq=0,
+                                             check=entry.check)
+                self._retrieving[src] = time.monotonic() + seconds + 2.0
+                return
+            if item.can_retrieve and not item.retrieving \
+                    and item.retrieve_tries < MAX_FETCHES:
+                if self._retrieve(item, quiet=True):
+                    return
+
+    def _on_resent(self, message, peer):
+        """Fragments came again, asked for by us. On a link thread."""
+        self._fetch_state()
+        self._retrieving.pop(message.src, None)
+        name = peer.name or self._name_of(message.src)
+        item = self.inbox.find(message.src, message.msg_id, message.total)
+        nothing = len(message.missing) >= message.total
+        if item is None:
+            if nothing:
+                log.info("no answer from %d about message %d", message.src, message.msg_id)
+                return
+            # A message that went while we were out of range.
+            message = self._silence_gaps(dataclasses.replace(message, type=protocol.VOICE))
+            duration = self._voice_duration(message)
+            item = self.inbox.add_voice(message, name, duration)
+            self.state.flash(f"missed voice from {name} · {duration:.0f}s", 4.0)
+            if self.range_test is not None:
+                self.range_test.note("voice_fetched", f"{duration:.1f}s from {name}, "
+                                     f"missed while out of range")
+            self._after_inbox_change()
+            self._autoplay(item)
+            return
+
+        item.retrieving = False
+        wanted_play = item.id in self._play_when_fetched
+        self._play_when_fetched.discard(item.id)
+        arrived = self.inbox.merge(item, message)
+        if not arrived:
+            self.inbox.save()
+            if wanted_play:
+                self.state.flash(f"no answer from {name}" if nothing
+                                 else f"{name} sent nothing new", 3.0)
+            self._after_inbox_change()
+            return
+        item.duration = self._voice_duration(
+            dataclasses.replace(message, body=self.inbox.voice_bytes(item),
+                                flags=item.codec_mode))
+        self.inbox.save()
+        whole = not item.missing
+        log.info("message %d from %d: %d fragment(s) came again, %d still missing",
+                 message.msg_id, message.src, len(arrived), len(item.missing))
+        if self.range_test is not None:
+            self.range_test.note("voice_fetched", f"{len(arrived)} fragment(s) from "
+                                 f"{name}, {len(item.missing)} still missing")
+        self.state.flash(f"voice from {name}: " + ("complete now" if whole
+                         else f"{len(arrived)} more part(s)"), 3.0)
+        if wanted_play:
+            self._autoplay(item)
+        else:
+            item.played = False           # worth hearing again: shown as new
+        self._after_inbox_change()
+
+    def _after_inbox_change(self):
+        self.state.inbox = self.inbox.items
+        self.state.unread = self.inbox.unread
+        self._wake.set()
+
+    def _on_retrieve(self, src: int, request):
+        """Another radio asks for one of our messages again. On the rx thread."""
+        item = self.inbox.find(None, request.msg_id, request.total, outgoing=True)
+        if item is None or item.dst not in (src, protocol.BROADCAST):
+            return None
+        data = self.inbox.voice_bytes(item)
+        if not data:
+            return None
+        if request.check_seq != protocol.NO_CHECK and (
+                request.check_seq >= item.total
+                or protocol.chunk_check(data, request.check_seq, item.fragment_size)
+                != request.check):
+            log.info("%d asked for message %d, but not the one we kept under that "
+                     "number", src, request.msg_id)
+            return None
+        self.state.flash(f"sending {self._name_of(src)} what it missed", 3.0)
+        self._wake.set()
+        return data, item.codec_mode
+
+    # --- range test ------------------------------------------------------------
+    def _range_peer(self):
+        """The radio under test: the one being talked to, else the first paired."""
+        paired = self._paired_addresses()
+        addr, _name = self._target
+        if addr in paired:
+            return addr, self._name_of(addr)
+        return (paired[0], self._name_of(paired[0])) if paired else None
+
+    def _start_range_test(self):
+        if self.link is None:
+            self.state.flash("radio offline")
+            self.player.cue(self.cues.error)
+            return
+        self._stop_range_test()
+        peer = self._range_peer()
+        self._show(RANGE)
+        if peer is None:
+            self.state.range_view = {}
+            return
+        addr, name = peer
+        self._target = (addr, name)
+        self._refresh_entries()
+        self.range_test = RangeTest(addr, name, self.settings.data_dir,
+                                    self.settings.radio.range_test_seconds,
+                                    self.settings.radio.air_speed)
+        self._refresh_range_view()
+        log.info("range test with %s (%d) started", name, addr)
+
+    def _stop_range_test(self):
+        test, self.range_test = self.range_test, None
+        if test is None:
+            return
+        test.close()
+        log.info("range test stopped: %d of %d probes answered; log %s",
+                 test.answered, test.sent, test.path)
+        if test.path is not None:
+            self.state.flash(f"saved {test.path.name}", 4.0)
+
+    def _range_tick(self):
+        """Probe when due, and log the probes that went unanswered."""
+        test = self.range_test
+        if test is None or self.link is None:
+            return
+        now = time.monotonic()
+        test.duty_used = self.link.budget.fraction_used()
+        test.expire(now)
+        if test.due(now):
+            if self._radio_is_busy() or self.state.radio_state == RECORDING:
+                test.next_due = now + 2.0         # after this message
+            elif not self._probe_fits():
+                test.probe_skipped("duty cycle", now)
+            else:
+                seq = self._probe(test.peer)
+                if seq is None:
+                    test.probe_skipped("not paired", now)
+                else:
+                    test.probe_sent(seq, now)
+        self._refresh_range_view()
+
+    def _probe_fits(self) -> bool:
+        budget = self.link.budget
+        if budget.unlimited:
+            return True
+        cost = self.link.packet_seconds(protocol.PING, self.range_test.peer, 16)
+        return budget.remaining_seconds() >= cost
+
+    def _refresh_range_view(self):
+        test = self.range_test
+        if test is None:
+            return
+        air = self.settings.radio.air_speed
+        self.state.range_view = {
+            "name": test.name, "interval": test.interval,
+            "air": f"{air / 1000:g}k", "success": test.success,
+            "window": (sum(test.recent), len(test.recent)),
+            "down": test.down, "up": test.up, "sent": test.sent,
+            "answered": test.answered, "marks": test.marks,
+            "elapsed": test.elapsed(), "last_result": test.last_result,
+            "log": test.path.name if test.path else "",
+        }
+
+    def _mark_spot(self):
+        if self.range_test is None:
+            return
+        number = self.range_test.mark()
+        self.state.flash(f"mark {number}", 2.0)
+        if self.settings.audio.cues:
+            self.player.cue(self.cues.tx_done)
+        self._refresh_range_view()
+
+    def _probe_now(self):
+        if self.range_test is not None:
+            self.range_test.next_due = time.monotonic()
+            self._wake.set()
 
     # --- push to talk ---------------------------------------------------
     def _on_talk_start(self):
@@ -1074,7 +1509,10 @@ class WalkieApp:
             self._wake.set()
             return
 
-        self._show(TALK)
+        if self.state.screen != RANGE:
+            # The range test shows its own progress, and leaving it would
+            # end the test.
+            self._show(TALK)
         self.state.radio_state = RECORDING
         self.display.set_led(theme.LED_REC)
         self._wake.set()
@@ -1143,17 +1581,22 @@ class WalkieApp:
         self.display.set_led(theme.LED_TX)
         self._wake.set()
 
-        self.link.send_voice(address, encoded, self.codec_mode)
-        self._record_outgoing(name, duration, len(encoded))
+        msg_id = self.link.send_voice(address, encoded, self.codec_mode)
+        self._record_outgoing(name, duration, encoded, msg_id, packets, address)
+        if self.range_test is not None:
+            self.range_test.note("voice_tx", f"{duration:.1f}s to {name}, "
+                                 f"{packets} fragment(s)")
 
-    def _record_outgoing(self, target_name: str, duration: float, size: int):
+    def _record_outgoing(self, target_name: str, duration: float, encoded: bytes,
+                         msg_id: int, total: int, dst: int):
+        """Keep what was sent: it is what a request for it again is answered from."""
         sent = protocol.Message(
-            type=protocol.VOICE, src=self.settings.radio.address, msg_id=0, body=b"",
-            flags=self.codec_mode, missing=[], rssi_dbm=None,
-            received_at=time.time(),
+            type=protocol.VOICE, src=self.settings.radio.address, msg_id=msg_id,
+            body=encoded, flags=self.codec_mode, missing=[], rssi_dbm=None,
+            received_at=time.time(), dst=dst, total=total,
+            fragment_size=protocol.VOICE_CHUNK,
         )
-        self.inbox.add_voice(sent, target_name, duration,
-                             outgoing=True, store_audio=False)
+        self.inbox.add_voice(sent, target_name, duration, outgoing=True)
         self.state.inbox = self.inbox.items
 
     # --- receiving ------------------------------------------------------
@@ -1168,10 +1611,31 @@ class WalkieApp:
         if message.type in pairing:
             pairing[message.type]()
             return
-        self.roster.note_peer(message.src, peer.name, message.rssi_dbm)
+        heard = not (message.type == protocol.RESENT
+                     and len(message.missing) >= message.total)
+        if heard:
+            self.roster.note_peer(message.src, peer.name, message.rssi_dbm)
+            if message.rssi_dbm is not None:
+                self.state.last_rssi = message.rssi_dbm
+            if self.monitor is not None:
+                self.monitor.heard(message.src, message.rssi_dbm, time.monotonic())
+
+        if message.type in (protocol.PING, protocol.PONG):
+            # Bookkeeping, every couple of minutes: it must not light the
+            # screen or write the card each time.
+            if message.type == protocol.PING:
+                self._on_ping(message)
+            else:
+                self._on_pong(message)
+            self._wake.set()
+            return
         self.roster.save()
-        self.state.last_rssi = message.rssi_dbm
         self.display.poke()
+
+        if message.type == protocol.RESENT:
+            self._on_resent(message, peer)
+            self._wake.set()
+            return
 
         if message.type in (protocol.HELLO, protocol.HELLO_ACK):
             # Sealed with our shared key, so the name in it is really theirs.
@@ -1190,7 +1654,13 @@ class WalkieApp:
             message = self._silence_gaps(message)
             duration = self._voice_duration(message)
             item = self.inbox.add_voice(message, name, duration)
-            self.state.flash(f"{name} · {duration:.0f}s voice")
+            self.state.flash(f"{name} · {duration:.0f}s voice"
+                             + (" · gaps" if message.missing else ""))
+            if self.range_test is not None:
+                self.range_test.note(
+                    "voice_rx", f"{duration:.1f}s from {name}, "
+                    f"{len(message.missing)} of {message.total} fragment(s) missing",
+                    rssi_down_dbm=message.rssi_dbm)
             self._autoplay(item)
         else:
             return
@@ -1260,7 +1730,7 @@ class WalkieApp:
         if item.kind != "voice" or not item.voice_file:
             self.state.flash("nothing to play")
             return
-        threading.Thread(target=self._play_item, args=(item,),
+        threading.Thread(target=self._play_item, args=(item, True),
                          name="playback", daemon=True).start()
 
     def _replay_last(self):
@@ -1268,10 +1738,15 @@ class WalkieApp:
         if item is None:
             self.state.flash("no voice yet")
             return
-        threading.Thread(target=self._play_item, args=(item,),
+        threading.Thread(target=self._play_item, args=(item, True),
                          name="replay", daemon=True).start()
 
-    def _play_item(self, item):
+    def _play_item(self, item, fetch_gaps: bool = False):
+        """Play a kept message. `fetch_gaps`: the operator chose to hear it
+        again, so if parts of it never arrived, ask the sender for them --
+        and play it once more when they come."""
+        if fetch_gaps and item.can_retrieve and not item.retrieving:
+            self._retrieve(item, play_when_done=True)
         if not self._playback_lock.acquire(timeout=10):
             return
         try:
@@ -1336,8 +1811,14 @@ class WalkieApp:
                 "packets_tx": stats.packets_tx, "packets_rx": stats.packets_rx,
                 "frames_dropped": stats.frames_dropped,
                 "messages_rx": stats.messages_rx,
+                "air": f"{self.settings.radio.air_speed / 1000:g}k",
             }
         self.state.unread = self.inbox.unread
+        self._update_link_status()
+        # Leaving the range test any way at all ends it: nothing probes
+        # behind another screen.
+        if self.range_test is not None and self.state.screen not in (RANGE, EDIT):
+            self._stop_range_test()
 
         if (self.link is not None and not self._warned_config_mode
                 and self.link.stats.config_mode_replies >= 3):
@@ -1441,6 +1922,15 @@ class WalkieApp:
             deadlines.append(max(1.0, self._beacon_due - time.monotonic()))
         if self._pairing:
             deadlines.append(self._pairing_deadline())
+        now = time.monotonic()
+        if self.link is not None and self.settings.radio.link_check_seconds:
+            deadlines.append(max(0.5, self._check_due - now))
+        if self.monitor is not None:
+            change = self.monitor.next_change(now)
+            if change is not None:
+                deadlines.append(max(0.5, change))
+        if self.range_test is not None:
+            deadlines.append(self.range_test.next_deadline(now))
         if self.state.battery_present:
             # A wakeup a minute is nothing against a device drawing half
             # an amp, and it is exactly when the charge matters.
@@ -1485,6 +1975,8 @@ class WalkieApp:
 
             if self._pairing:
                 self._pairing_tick()
+            self._link_check_tick()
+            self._range_tick()
             if self.link is not None:
                 if self.link.reassembling:
                     self.link.tick()
@@ -1504,6 +1996,7 @@ class WalkieApp:
 
     def _shutdown(self):
         log.info("shutting down (%s)", self._exit_reason)
+        self._stop_range_test()
         try:
             self.recorder.close()
             self.player.stop()
