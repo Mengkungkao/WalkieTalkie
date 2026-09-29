@@ -206,8 +206,8 @@ def provision(defaults) -> int:
         except Exception as exc:
             pins.close()
             print(f"! cannot open {args.port}: {exc}", file=sys.stderr)
-            print("  Is the walkie app still running? It holds the port: quit it "
-                  "(four clicks) and try again.", file=sys.stderr)
+            print("  Is the walkie app or the Messenger still running? It holds the "
+                  "port: quit it (four clicks) and try again.", file=sys.stderr)
             return 1
 
         if args.check:

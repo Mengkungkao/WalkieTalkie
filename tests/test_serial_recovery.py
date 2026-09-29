@@ -125,6 +125,71 @@ def test_another_process_holding_the_port_is_named(tmp_path, monkeypatch):
         holder.wait()
 
 
+# --- the Messenger on the same board -------------------------------------------
+@pytest.fixture
+def pty_port():
+    """A serial port both apps could open: the slave end of a pty."""
+    import os
+    master, slave = os.openpty()
+    try:
+        yield os.ttyname(slave)
+    finally:
+        os.close(slave)
+        os.close(master)
+
+
+@pytest.fixture
+def messenger_holds(tmp_path, pty_port):
+    """The Messenger running, with the radio's port open and locked."""
+    folder = tmp_path / "Messenger"
+    folder.mkdir()
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import serial, sys; port = serial.Serial(sys.argv[1], exclusive=True); "
+         "print('ready', flush=True); sys.stdin.read()", pty_port],
+        cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        yield pty_port
+    finally:
+        child.stdin.close()
+        child.wait(timeout=5)
+
+
+def test_a_second_opener_is_refused_until_the_first_closes(pty_port):
+    first = SX126x(port=pty_port, addr=1, freq_mhz=868)
+    try:
+        with pytest.raises(sx126x.PortBusy):
+            SX126x(port=pty_port, addr=1, freq_mhz=868)
+    finally:
+        first.close()
+    SX126x(port=pty_port, addr=1, freq_mhz=868).close()
+
+
+def test_the_holder_is_named_by_its_app_folder(messenger_holds):
+    with pytest.raises(sx126x.PortBusy) as refused:
+        SX126x(port=messenger_holds, addr=1, freq_mhz=868)
+    assert refused.value.holders == ["Messenger"]
+    assert any(p.startswith("Messenger (") for p in port_conflicts(messenger_holds))
+
+
+def test_the_app_says_which_app_to_quit(messenger_holds):
+    from app.config.settings import Settings
+    from app.main import WalkieApp
+    from app.ui.screens import TALK, ViewState
+
+    app = WalkieApp.__new__(WalkieApp)
+    app.settings = Settings()
+    app.settings.radio.port = messenger_holds
+    app.settings.radio.address = 1
+    app.state = ViewState(screen=TALK)
+    app.radio = app.link = None
+    app._open_radio()
+    assert app.link is None
+    assert app.radio_offline == "radio busy: quit Messenger"
+    assert app.state.radio_note == "radio busy: quit Messenger"
+
+
 # --- a module stuck in configuration mode -------------------------------------
 class ConfigMode(FakeModule):
     """M1 held high: every write is a bad setting, answered FF FF FF."""

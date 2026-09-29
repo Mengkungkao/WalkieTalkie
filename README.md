@@ -1056,6 +1056,7 @@ a duty-cycle exhaustion — entirely in software.
 | `fuser -v /dev/ttyS0` shows `bash` (Orange Pi) | Auto-login shell on the console | `./install-orangepi-zero2w.sh` and reboot |
 | `write failed: [Errno 5] Input/output error` in the log | The port was hung up under the app — a login shell on it restarting | The app now reopens the port; to stop it happening, `./install-orangepi-zero2w.sh` and reboot |
 | `LoRa port shared: run ./setup.sh` on screen | Something else has the LoRa port open, or the kernel console is on it | Run the board's installer and reboot |
+| `radio busy: quit Messenger` on screen | The [Messenger](../Messenger) has the radio: both apps lock the port, and the second one is refused | Open the Messenger, quit it (four clicks), then open WalkieTalkie again |
 | Voice breaks up, or is noise after a point | Fragments lost; before this version a lost fragment garbled the rest | Update; see [When fragments go missing](#when-fragments-go-missing) |
 | Messages stop arriving at a distance | Signal below the module's sensitivity | See [Range](#range) |
 | `to talk: Home > Start` when holding | A hold only talks inside Start | Home → Start, then hold |
@@ -1129,6 +1130,54 @@ voice path reports itself unavailable and the app runs on.
 ---
 
 ## Recent changes
+
+### Sharing a board with the Messenger
+
+#### Update summary
+- WalkieTalkie and the [Messenger](../Messenger) can be installed on the
+  same radio without breaking each other. Both apps now lock the LoRa
+  port. Whichever starts second is refused and names the one to quit,
+  instead of each quietly getting half the bytes.
+
+#### What changed
+- [app/radio/sx126x.py](app/radio/sx126x.py) opens the port with
+  `exclusive=True` (an `flock`). A port that is already locked raises
+  `PortBusy` and names the holder by its app folder (`port_users`). The
+  Messenger's driver got the same change.
+- The screen says **radio busy: quit Messenger** (for 10 s, then under
+  Settings as the radio mode). Starting a call, pairing or a range test
+  without a radio says the same, not just "radio offline".
+- Why it was possible: the Whisplay desktop starts an app without
+  stopping the one before, and WalkieTalkie keeps its radio when it
+  loses the screen, so it can keep listening. An app started over SSH or
+  at boot counts too. The start-up check only logged "LoRa port shared"
+  and carried on sharing.
+- The Messenger now reads the frequency and air rate from this
+  `config.yaml` (`auto`). So `provision_radio.py --range …` here moves
+  both apps at once. Its own provisioning tool refuses to write anything
+  else.
+- The Messenger also used to hand the desktop back with the backlight at
+  80%. That is PWM on M0, so a WalkieTalkie still running in the
+  background went deaf. It now hands it back at 100%, as WalkieTalkie
+  does.
+
+#### Validation
+- `python3 -m pytest tests -q`: **557 passed** (3 new, in
+  `test_serial_recovery.py`):
+  - a second opener refused until the first closes;
+  - a real child process holding a pty, named "Messenger" by its folder;
+  - the app's *radio busy: quit Messenger*.
+- On the Pi Zero 2 W, with the Messenger holding `/dev/ttyS0`, this
+  driver was refused with `/dev/ttyS0 is in use by Messenger`.
+- Both radios hold 2400 bps now: the `--range long` change from the
+  previous entry is done, and both `config.yaml` files say
+  `air_speed: 2400`. The Messenger exchanged messages both ways at that
+  rate.
+
+#### Notes
+- The holder can be named only when both processes run with the same
+  user and group, as two apps started from the HAT desktop do.
+  Otherwise the screen says "quit the other app".
 
 ### In range or not, fetching a message again, more range, and a range test
 

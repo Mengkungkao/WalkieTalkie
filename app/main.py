@@ -41,7 +41,7 @@ from app.radio import modepins
 from app.config.settings import hostname_callsign
 from app.radio.link import LoraLink, NotPaired
 from app.radio.linkcheck import DISCONNECTED, IN_RANGE, UNKNOWN, WEAK, LinkMonitor
-from app.radio.sx126x import SX126x, port_conflicts
+from app.radio.sx126x import PortBusy, SX126x, port_conflicts
 from app.rangetest import RangeTest
 from app.store.inbox import Inbox
 from app.store.keyring import Keyring
@@ -116,6 +116,8 @@ class WalkieApp:
     # Defaults for state that __init__ would otherwise have to set before
     # anything can run; tests build the app without hardware via __new__.
     link = None
+    # What to say when there is no link: why the radio did not open.
+    radio_offline = "radio offline"
     keyring = None
     _pending_pair = None
     _parents = None
@@ -249,6 +251,15 @@ class WalkieApp:
                 freq_mhz=radio_settings.frequency_mhz,
                 uart_baud=radio_settings.uart_baud, mode_pins=mode_pins,
             )
+        except PortBusy as exc:
+            # The desktop starts an app without stopping the one before.
+            log.error("%s. One app per radio: quit it, then open WalkieTalkie "
+                      "again.", exc)
+            holder = exc.holders[0] if exc.holders else "the other app"
+            self.radio_offline = f"radio busy: quit {holder}"
+            self.state.radio_note = self.radio_offline
+            self.state.flash(self.radio_offline, 10.0)
+            return
         except Exception as exc:
             log.error("radio unavailable on %s: %s", radio_settings.port, exc)
             self.state.flash("radio offline", 6.0)
@@ -857,7 +868,7 @@ class WalkieApp:
     # save the other: the one that asked saves when the answer arrives.
     def _start_pairing(self):
         if self.link is None:
-            self.state.flash("radio offline")
+            self.state.flash(self.radio_offline)
             self.player.cue(self.cues.error)
             return
         self._pairing = True
@@ -1387,7 +1398,7 @@ class WalkieApp:
 
     def _start_range_test(self):
         if self.link is None:
-            self.state.flash("radio offline")
+            self.state.flash(self.radio_offline)
             self.player.cue(self.cues.error)
             return
         self._stop_range_test()
@@ -1490,7 +1501,7 @@ class WalkieApp:
             self._wake.set()
             return
         if self.link is None:
-            self.state.flash("radio offline")
+            self.state.flash(self.radio_offline)
             self._wake.set()
             return
         if not self.recorder.available or self.codec is None:
