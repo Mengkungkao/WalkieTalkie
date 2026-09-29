@@ -12,7 +12,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from app.ui import theme, widgets
+from mfruit_sdk.status import Status
+from mfruit_sdk.ui import Canvas, Row, draw_list, footer, status_bar, toast
+from mfruit_sdk.ui import theme as mfruit_layout
+
+from app.ui import theme
 from app.ui.widgets import (centred, ellipsise, meter, panel, signal_bars,
                             two_line_row, vu_meter)
 
@@ -39,15 +43,31 @@ SENDING = "sending"
 RECEIVING = "receiving"
 PLAYING = "playing"
 
-HEADER_HEIGHT = 30
-FOOTER_Y = 244
+# MFruit OS's layout: status bar (page name, WiFi, battery) at the top,
+# gesture hints at the bottom.
+FOOTER_Y = mfruit_layout.FOOTER_Y
+HEADER_HEIGHT = mfruit_layout.CONTENT_TOP - 6
 
-# The usable band between header and footer. Everything draws inside it:
-# the status screen used to run 25 px past the footer and print its last
-# three rows straight through the gesture hints.
-CONTENT_TOP = HEADER_HEIGHT + 6
-CONTENT_BOTTOM = FOOTER_Y - 6
+# The usable band between status bar and footer. Everything draws inside
+# it: the status screen used to run 25 px past the footer and print its
+# last three rows straight through the gesture hints.
+CONTENT_TOP = mfruit_layout.CONTENT_TOP
+CONTENT_BOTTOM = mfruit_layout.CONTENT_BOTTOM
 CONTENT_HEIGHT = CONTENT_BOTTOM - CONTENT_TOP
+
+# Room in the status bar for the LoRa signal meter, left of WiFi/battery.
+SIGNAL_SLOT = 20
+
+# Editor titles are identifiers in app.main; this is how they read on screen.
+# Page names share the status bar with the signal meter, WiFi and battery,
+# so they stay short (tests/test_screens.py checks every one fits).
+EDITOR_TITLES = {
+    "DEVICE ID": "Device ID", "NAME": "Name", "CHANNEL": "Channel", "VOICE": "Voice",
+    "BASE STATION": "Base", "DATE & TIME": "Clock", "RESET": "Reset",
+    "PAIRING": "Pairing",
+}
+PAGE_TITLES = {HOME: "Walkie", START: "Start", CONTACTS: "Paired", INBOX: "Receive",
+               STATUS: "Status", SETTINGS: "Settings", PAIR: "Pair", RANGE: "Range"}
 
 # Shared margins, so columns line up between screens.
 MARGIN = 8
@@ -136,6 +156,11 @@ class ViewState:
     battery_detail: str = ""
     battery_percent: float | None = None
     battery_low: bool = False
+    battery_charging: bool = False
+    wifi_level: int | None = None
+
+    # A hold passed the threshold on a menu: the footer says what release does.
+    armed: bool = False
 
     brightness_locked: bool = False
 
@@ -187,77 +212,42 @@ STATE_LABEL = {
 
 
 # --- chrome ------------------------------------------------------------
-def draw_header(draw, state: ViewState, title: str):
-    # Rounded at the top to follow the panel, square at the bottom where
-    # it meets the content. A square fill here loses its corners to the
-    # bezel and looks like a rendering fault.
-    # Round the top, square the bottom. Drawn as a rounded rectangle plus
-    # a patch rather than with `corners=`, which needs Pillow 9.4 and is
-    # not worth a version floor for two corners.
-    radius = theme.CORNER_RADIUS
-    draw.rounded_rectangle([0, 0, theme.SCREEN_WIDTH - 1, HEADER_HEIGHT],
-                           radius=radius, fill=theme.SURFACE)
-    draw.rectangle([0, radius, theme.SCREEN_WIDTH - 1, HEADER_HEIGHT],
-                   fill=theme.SURFACE)
-    draw.line([0, HEADER_HEIGHT, theme.SCREEN_WIDTH, HEADER_HEIGHT],
-              fill=theme.BORDER)
-    draw.text((10, 8), ellipsise(draw, title, theme.font(14, "bold"), 96),
-              font=theme.font(14, "bold"), fill=theme.TEXT)
-
-    # Right-hand status, ordered like a phone's: how far you can reach,
-    # then how long you can keep reaching.
-    signal_bars(draw, 144, 9, state.last_rssi)
-
-    x, y, width, height = 172, 10, 22, 11
-    draw.rounded_rectangle([x, y, x + width, y + height], radius=2,
-                           outline=theme.BORDER)
-    draw.rectangle([x + width + 1, y + 3, x + width + 3, y + height - 3],
-                   fill=theme.BORDER)
-
+def _status(state: ViewState) -> Status:
+    battery = None
     if state.battery_present and state.battery_percent is not None:
-        fraction = max(0.0, min(1.0, state.battery_percent / 100.0))
-        colour = (theme.DANGER if state.battery_low else
-                  theme.WARN if fraction < 0.4 else theme.OK)
-        if fraction > 0.02:
-            draw.rectangle([x + 2, y + 2,
-                            x + 2 + int((width - 4) * fraction), y + height - 2],
-                           fill=colour)
-        # A bar answers "roughly?"; the number answers "will this last
-        # the walk back?".
-        draw.text((200, 9), f"{state.battery_percent:.0f}%",
-                  font=theme.font(11), fill=colour)
-    else:
-        # No battery is not nothing to say -- it means mains, which is
-        # what you want to know about a base station. Blank space would
-        # read as a missing reading instead.
-        draw.polygon([(x + 13, y + 2), (x + 8, y + 6), (x + 11, y + 6),
-                      (x + 9, y + 10), (x + 16, y + 5), (x + 12, y + 5)],
-                     fill=theme.ACCENT)
-        draw.text((200, 9), "EXT", font=theme.font(11), fill=theme.ACCENT)
-
-    # Duty-cycle pressure: a thin bar that only earns attention when high.
-    if state.duty_fraction > 0.01:
-        colour = theme.OK if state.duty_fraction < 0.6 else (
-            theme.WARN if state.duty_fraction < 0.9 else theme.DANGER
-        )
-        meter(draw, [112, 12, 134, 18], state.duty_fraction, colour, radius=2)
+        battery = int(round(state.battery_percent))
+    return Status(state.wifi_level, battery, state.battery_charging)
 
 
-def draw_footer(draw, state: ViewState, lines: list):
+def draw_header(draw, state: ViewState, title: str):
+    """MFruit OS's status bar: page name, then LoRa signal, WiFi, battery.
+
+    The signal meter answers "how far can I reach"; it sits in a slot
+    the status bar keeps free for it.
+    """
+    canvas = Canvas.over(draw, theme.MFRUIT)
+    slot = status_bar(canvas, title, _status(state), reserve=SIGNAL_SLOT)
+    signal_bars(draw, slot, mfruit_layout.STATUS_Y + 2, state.last_rssi)
+
+
+def draw_footer(draw, state: ViewState, hints: list):
+    """Gesture hints, from the same table the app dispatches on; a banner
+    (a flash message) shows above them."""
+    canvas = Canvas.over(draw, theme.MFRUIT)
+    if state.armed:
+        from app.ui import navigation
+
+        hints = navigation.hints(state.screen, inbox_empty=not state.inbox,
+                                 armed=True) or hints
+    footer(canvas, hints)
     banner = state.active_banner
     if banner:
-        panel(draw, [8, FOOTER_Y - 4, theme.SCREEN_WIDTH - 8, FOOTER_Y + 26],
-              fill=theme.SURFACE_HI)
-        centred(draw, FOOTER_Y + 3,
-                ellipsise(draw, banner, theme.font(13, "bold"), 210),
-                theme.font(13, "bold"), theme.TEXT)
-        return
-    widgets.hint(draw, FOOTER_Y, lines)
+        toast(canvas, banner)
 
 
 # --- contacts ----------------------------------------------------------
 def draw_contacts(draw, state: ViewState):
-    draw_header(draw, state, "PAIRED")
+    draw_header(draw, state, PAGE_TITLES[CONTACTS])
 
     if not state.entries:
         centred(draw, 110, "no paired radios yet", theme.font(15), theme.TEXT_DIM)
@@ -280,8 +270,7 @@ def draw_contacts(draw, state: ViewState):
         top = CONTENT_TOP + offset * row_height
         chosen = index == state.selected_index
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + CONTACT_PANEL],
-              fill=theme.SURFACE_HI if chosen else theme.SURFACE,
-              outline=theme.ACCENT if chosen else None)
+              fill=theme.SELECTED if chosen else theme.SURFACE)
 
         # Hearing a station does not prove it hears you, and a one-way
         # link is the classic radio failure -- you talk for a minute
@@ -350,7 +339,7 @@ def draw_contacts(draw, state: ViewState):
 
 # --- talk --------------------------------------------------------------
 def draw_talk(draw, state: ViewState):
-    draw_header(draw, state, state.target_name or "ALL STATIONS")
+    draw_header(draw, state, state.target_name or "All stations")
 
     colour = STATE_COLOUR[state.radio_state]
     label = STATE_LABEL[state.radio_state]
@@ -446,7 +435,8 @@ def draw_talk(draw, state: ViewState):
 
 # --- inbox -------------------------------------------------------------
 def draw_inbox(draw, state: ViewState):
-    draw_header(draw, state, f"RECEIVE{f'  ({state.unread})' if state.unread else ''}")
+    # How many are new shows on the rows (green dots) and on Home.
+    draw_header(draw, state, PAGE_TITLES[INBOX])
 
     if not state.inbox:
         centred(draw, 120, "nothing received yet", theme.font(14), theme.TEXT_DIM)
@@ -465,8 +455,7 @@ def draw_inbox(draw, state: ViewState):
         top = CONTENT_TOP + offset * row_height
         chosen = index == state.inbox_index
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + INBOX_PANEL],
-              fill=theme.SURFACE_HI if chosen else theme.SURFACE,
-              outline=theme.ACCENT if chosen else None)
+              fill=theme.SELECTED if chosen else theme.SURFACE)
 
         tint = theme.VOICE if item.kind == "voice" else theme.ACCENT
         draw.rectangle([6, top, 10, top + INBOX_PANEL], fill=tint)
@@ -494,7 +483,7 @@ def draw_inbox(draw, state: ViewState):
 
 # --- status ------------------------------------------------------------
 def draw_status(draw, state: ViewState):
-    draw_header(draw, state, "STATUS")
+    draw_header(draw, state, PAGE_TITLES[STATUS])
 
     stats = state.stats or {}
     power = state.battery_summary if state.battery_present else "external power"
@@ -575,72 +564,38 @@ def _hints(screen: str, inbox_empty: bool = False) -> list:
 # --- menus -------------------------------------------------------------
 def draw_menu(draw, state: ViewState, screen: str, title: str, items: list,
               selected: int, top_offset: int = 0):
-    """A list of two-line rows to pick from: Home, Start and Settings."""
+    """A list of rows to pick from: Home, Start and Settings, as MFruit OS draws lists."""
     draw_header(draw, state, title)
-
-    if not items:
-        centred(draw, 130, "nothing here", theme.font(15), theme.TEXT_DIM)
-        draw_footer(draw, state, _hints(screen))
-        return
-
-    list_top = CONTENT_TOP + top_offset
-    row_height = SETTING_ROW
-    selected %= len(items)
-    visible = max(1, min(len(items), (CONTENT_BOTTOM - list_top - 14) // row_height))
-    first = max(0, min(selected - visible // 2, len(items) - visible))
-
-    for offset, item in enumerate(items[first:first + visible]):
-        index = first + offset
-        top = list_top + offset * row_height
-        chosen = index == selected
-        # Destructive entries are tinted so they are never opened by reflex.
-        accent = theme.DANGER if item.get("destructive") else theme.ACCENT
-        panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + SETTING_PANEL],
-              fill=theme.SURFACE_HI if chosen else theme.SURFACE,
-              outline=accent if chosen else None)
-
-        text_width = theme.SCREEN_WIDTH - 16 - MARGIN - 8
-        name_font = theme.font(14, "bold" if chosen else "regular")
-        draw.text((16, top + SETTING_NAME_Y),
-                  ellipsise(draw, item["label"], name_font, text_width),
-                  font=name_font,
-                  fill=(theme.DANGER if item.get("destructive")
-                        else (theme.TEXT if chosen else theme.TEXT_DIM)))
-        value = str(item.get("value", ""))
-        if value:
-            draw.text((16, top + SETTING_DETAIL_Y),
-                      ellipsise(draw, value, theme.font(11), text_width),
-                      font=theme.font(11), fill=theme.TEXT_FAINT)
-
-    if len(items) > visible:
-        centred(draw, list_top + visible * row_height,
-                f"{selected + 1} / {len(items)}", theme.font(11), theme.TEXT_FAINT)
-
+    rows = [Row(item["label"], subtitle=str(item.get("value", "")) or None,
+                kind="danger" if item.get("destructive") else "action")
+            for item in items]
+    draw_list(Canvas.over(draw, theme.MFRUIT), rows, selected % len(rows) if rows else 0,
+              top=CONTENT_TOP + top_offset, empty="Nothing here")
     draw_footer(draw, state, _hints(screen))
 
 
 def draw_home(draw, state: ViewState):
     small = theme.font(11)
     me = f"{state.callsign or 'this radio'}  ·  ID {state.address}  ·  ch {state.channel}"
-    draw_menu(draw, state, HOME, "WALKIE", state.home_items, state.home_index,
+    draw_menu(draw, state, HOME, PAGE_TITLES[HOME], state.home_items, state.home_index,
               top_offset=18)
     centred(draw, CONTENT_TOP, ellipsise(draw, me, small, theme.SCREEN_WIDTH - 2 * MARGIN),
             small, theme.TEXT_DIM)
 
 
 def draw_start(draw, state: ViewState):
-    draw_menu(draw, state, START, "START", state.start_items, state.start_index)
+    draw_menu(draw, state, START, PAGE_TITLES[START], state.start_items, state.start_index)
 
 
 def draw_settings(draw, state: ViewState):
-    draw_menu(draw, state, SETTINGS, "SETTINGS", state.settings_items,
+    draw_menu(draw, state, SETTINGS, PAGE_TITLES[SETTINGS], state.settings_items,
               state.settings_index)
 
 
 # --- pairing -----------------------------------------------------------
 def draw_pair(draw, state: ViewState):
     """Radios heard pairing, and who this one is."""
-    draw_header(draw, state, "PAIR")
+    draw_header(draw, state, PAGE_TITLES[PAIR])
     width = theme.SCREEN_WIDTH - 2 * MARGIN
     small, status_font = theme.font(11), theme.font(12, "bold")
     me = f"this radio: {state.callsign or '?'} · ID {state.address} · ch {state.channel}"
@@ -671,8 +626,7 @@ def draw_pair(draw, state: ViewState):
         top = list_top + offset * row_height
         chosen = first + offset == selected
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + SETTING_PANEL],
-              fill=theme.SURFACE_HI if chosen else theme.SURFACE,
-              outline=theme.ACCENT if chosen else None)
+              fill=theme.SELECTED if chosen else theme.SURFACE)
         name_font = theme.font(14, "bold" if chosen else "regular")
         draw.text((16, top + SETTING_NAME_Y),
                   ellipsise(draw, name, name_font, text_width), font=name_font,
@@ -711,8 +665,7 @@ def _duration(seconds: float) -> str:
 
 def draw_range(draw, state: ViewState):
     """Home > Range test: how the link is doing, readable at arm's length."""
-    # "RANGE TEST" does not fit beside the header's meters.
-    draw_header(draw, state, "RANGE")
+    draw_header(draw, state, PAGE_TITLES[RANGE])
     view = state.range_view or {}
     small, tiny = theme.font(11), theme.font(10)
     width = theme.SCREEN_WIDTH - 2 * MARGIN
@@ -778,7 +731,8 @@ def draw_range(draw, state: ViewState):
 def draw_editor(draw, state: ViewState):
     """A modal value editor: one big value, and what the clicks do to it."""
     editor = state.editor
-    draw_header(draw, state, state.editor_title or "EDIT")
+    title = state.editor_title or "Edit"
+    draw_header(draw, state, EDITOR_TITLES.get(title, title.capitalize()))
     if editor is None:
         return
 
@@ -821,13 +775,19 @@ def draw_editor(draw, state: ViewState):
         centred(draw, 200, ellipsise(draw, state.editor_hint, theme.font(11), 220),
                 theme.font(11), theme.WARN)
 
-    commit = "confirm" if confirming else (
-        "save" if getattr(editor, "cursor", 0) >= getattr(editor, "digits", 1) - 1
-        and hasattr(editor, "digits") else "next")
-    draw_footer(draw, state, [
-        f"1 click change  ·  2 clicks {commit}",
-        "3 clicks cancel  ·  4 clicks exit",
-    ])
+    draw_footer(draw, state, editor_hints(editor))
+
+
+def editor_hints(editor) -> list:
+    """What the button does in an editor (a keyboard types, Enter saves, Esc cancels)."""
+    if hasattr(editor, "prompt"):
+        # "4× back", as in MFruit OS's own dialogs: "cancel" does not fit here.
+        return [("tap", "change"), ("hold", "confirm"), ("4×", "back")]
+    last = (not hasattr(editor, "digits")
+            or getattr(editor, "cursor", 0) >= editor.digits - 1)
+    if hasattr(editor, "field"):
+        last = editor.field >= len(editor.FIELDS) - 1
+    return [("tap", "change"), ("hold", "save" if last else "next"), ("4×", "cancel")]
 
 
 RENDERERS = {

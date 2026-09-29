@@ -1,16 +1,19 @@
-"""Entering values with one button.
+"""Entering values with one button -- or a keyboard.
 
 The HAT has a single button, so every editor here is a small state
-machine driven by click counts, with no state anywhere else. They are
+machine driven by input actions, with no state anywhere else. They are
 plain objects with no display or hardware dependency, which is what lets
 the whole of Settings be tested without a Pi.
 
-The gesture language matches the rest of the app so nothing has to be
+The actions are MFruit OS's (mfruit_sdk.input), so nothing has to be
 relearned inside an editor:
 
-    1 click   change the thing under the cursor (digit, choice)
-    2 clicks  commit -- next field, then save on the last one
-    3 clicks  cancel, discarding every change
+    tap / Down       change the thing under the cursor (next digit value, choice)
+    2 clicks / Up    change it back the other way
+    hold / Enter     commit -- next field, then save on the last one
+                     (Enter on a keyboard saves at once)
+    4 clicks / Esc   cancel, discarding every change
+    digits           typed straight into a number; Backspace steps back
 
 Push-to-talk is suspended while an editor is open. Hold-to-talk works on
 every other screen deliberately, but a hold here would transmit whatever
@@ -20,11 +23,14 @@ to talk while setting a value.
 **Digits are edited most-significant first** and the cursor only moves
 forward. Wrapping 0-9 with a single click means an address like 65534
 costs a lot of presses; that is the price of one button, and it is paid
-rarely. What must not happen is a mis-entry being hard to abandon, so
-cancel is always three clicks, from any field.
+rarely (a keyboard types it directly). What must not happen is a
+mis-entry being hard to abandon, so cancel is always four clicks or Esc,
+from any field.
 """
 
 from __future__ import annotations
+
+from mfruit_sdk.input import BACK, CHAR, ERASE, NEXT, PREVIOUS, SELECT
 
 
 class DigitEditor:
@@ -57,32 +63,46 @@ class DigitEditor:
     def text(self) -> str:
         return "".join(str(c) for c in self.cells)
 
-    def increment(self):
-        """One click: bump the digit under the cursor, wrapping 9 -> 0."""
-        self.cells[self.cursor] = (self.cells[self.cursor] + 1) % 10
+    def increment(self, step: int = 1):
+        """Tap: bump the digit under the cursor, wrapping 9 -> 0."""
+        self.cells[self.cursor] = (self.cells[self.cursor] + step) % 10
 
     def advance(self):
-        """Two clicks: next digit, or commit from the last one."""
+        """Hold: next digit, or commit from the last one."""
         if self.cursor + 1 < self.digits:
             self.cursor += 1
         else:
-            # Clamp rather than reject: an out-of-range number is always
-            # a slip, and silently refusing to close looks like a freeze.
-            self._set(self.value)
-            self.done = True
+            self.commit()
+
+    def commit(self):
+        # Clamp rather than reject: an out-of-range number is always
+        # a slip, and silently refusing to close looks like a freeze.
+        self._set(self.value)
+        self.done = True
+
+    def type_digit(self, digit: int):
+        """A digit typed on a keyboard: fill this cell, move to the next."""
+        self.cells[self.cursor] = digit
+        self.cursor = min(self.cursor + 1, self.digits - 1)
 
     def cancel(self):
         self.cancelled = True
         self.done = True
 
-    def handle(self, gesture: str) -> bool:
-        """Route a gesture. True when the editor has finished."""
-        if gesture == "single":
+    def handle(self, action: str, char: str = "", keyboard: bool = False) -> bool:
+        """Route an input action. True when the editor has finished."""
+        if action == NEXT:
             self.increment()
-        elif gesture == "double":
-            self.advance()
-        elif gesture == "triple":
+        elif action == PREVIOUS:
+            self.increment(-1)
+        elif action == SELECT:
+            self.commit() if keyboard else self.advance()
+        elif action == BACK:
             self.cancel()
+        elif action == CHAR and char.isdigit():
+            self.type_digit(int(char))
+        elif action == ERASE:
+            self.cursor = max(0, self.cursor - 1)
         return self.done
 
 
@@ -104,14 +124,23 @@ class ChoiceEditor:
     def text(self) -> str:
         return self.choices[self.index][0]
 
-    def handle(self, gesture: str) -> bool:
-        if gesture == "single":
-            self.index = (self.index + 1) % len(self.choices)
-        elif gesture == "double":
+    def handle(self, action: str, char: str = "", keyboard: bool = False) -> bool:
+        if action in (NEXT, PREVIOUS):
+            step = 1 if action == NEXT else -1
+            self.index = (self.index + step) % len(self.choices)
+        elif action == SELECT:
             self.done = True
-        elif gesture == "triple":
+        elif action == BACK:
             self.cancelled = True
             self.done = True
+        elif action == CHAR and char.strip():
+            # A typed letter jumps to the next choice that starts with it.
+            count = len(self.choices)
+            for offset in range(1, count + 1):
+                index = (self.index + offset) % count
+                if str(self.choices[index][0]).lower().startswith(char.lower()):
+                    self.index = index
+                    break
         return self.done
 
 
@@ -120,7 +149,7 @@ class ConfirmEditor:
 
     Starting on "No" and requiring the operator to click onto "Yes"
     before confirming means no single reflex gesture can wipe the
-    inbox -- which matters when the same two clicks mean "back" almost
+    inbox -- which matters when the same hold means "open" almost
     everywhere else.
     """
 
@@ -135,13 +164,15 @@ class ConfirmEditor:
     def text(self) -> str:
         return "YES" if self.yes else "no"
 
-    def handle(self, gesture: str) -> bool:
-        if gesture == "single":
+    def handle(self, action: str, char: str = "", keyboard: bool = False) -> bool:
+        if action in (NEXT, PREVIOUS):
             self.yes = not self.yes
-        elif gesture == "double":
+        elif action == CHAR and char.lower() in ("y", "n"):
+            self.yes = char.lower() == "y"
+        elif action == SELECT:
             self.done = True
             self.cancelled = not self.yes
-        elif gesture == "triple":
+        elif action == BACK:
             self.yes = False
             self.cancelled = True
             self.done = True
@@ -178,17 +209,22 @@ class ClockEditor:
     def field_name(self) -> str:
         return self.FIELDS[self.field][0]
 
-    def handle(self, gesture: str) -> bool:
+    def handle(self, action: str, char: str = "", keyboard: bool = False) -> bool:
         name, low, high, _width = self.FIELDS[self.field]
-        if gesture == "single":
+        if action == NEXT:
             value = self.values[self.field] + 1
             self.values[self.field] = low if value > high else value
-        elif gesture == "double":
+        elif action == PREVIOUS:
+            value = self.values[self.field] - 1
+            self.values[self.field] = high if value < low else value
+        elif action == SELECT:
             if self.field + 1 < len(self.FIELDS):
                 self.field += 1
             else:
                 self.done = True
-        elif gesture == "triple":
+        elif action == ERASE:
+            self.field = max(0, self.field - 1)
+        elif action == BACK:
             self.cancelled = True
             self.done = True
         return self.done

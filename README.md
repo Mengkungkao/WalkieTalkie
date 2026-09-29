@@ -9,12 +9,19 @@ transmitted. Anything another station sends arrives and plays on its
 own, like a walkie-talkie — no pairing handshake, no gateway, no
 internet, a kilometre or more of range.
 
+It is an **MFruit OS app**: it looks and handles like the rest of the
+device — MFruit OS's status bar, lists, footer hints and controls, from
+the vendored MFruit App SDK in `mfruit_sdk/` — and a **USB or Bluetooth
+keyboard** works everywhere the button does.
+
 ```
-   hold          record, then send to the selected station
-   1 click       next contact / next message / next screen
-   2 clicks      open, play, or go back
-   3 clicks      replay the last voice message
-   4 clicks      leave the app
+   button         keyboard       
+   tap            Down / Tab     next row
+   2 clicks       Up             previous row
+   hold, release  Enter          open the row
+   4 clicks       Esc            back; from Home, leave the app
+   hold           Space (held)   talk — on Start, Paired, Talk and Range test
+   3 clicks                      open the row where a hold talks; replay on Talk
 ```
 
 ---
@@ -424,7 +431,8 @@ different from the Pi:
 The app opens on a menu:
 
 ```
-WALKIE                         orangepizero2w · ID 6235 · ch 3
+Walkie                              ▂▄▆ ≋ ▭ 76%     page name, LoRa signal, WiFi, battery
+                               orangepizero2w · ID 6235 · ch 3
   Start           ──▶  To ALL               ──▶  Talk to every paired radio
                        To a paired device   ──▶  pick one  ──▶  Talk
   Receive         ──▶  what has come in, newest first
@@ -433,47 +441,71 @@ WALKIE                         orangepizero2w · ID 6235 · ch 3
   Range test      ──▶  probe a paired radio and log the signal (for testing)
 ```
 
-| Screen | 1 click | 2 clicks | 3 clicks | hold |
-|---|---|---|---|---|
-| **Home** | next row | open it | Status | — |
-| **Start** | next row | open it | back | talk |
-| **Paired** | next radio | talk to it | back | talk |
-| **Talk** | Receive | back | replay last voice | **talk** |
-| **Receive** | next message | back | play it (and fetch any gaps) | — (listen only) |
-| **Status** | back | back | Settings | — |
-| **Settings** | next setting | open it | back | — |
-| **Pair** | next radio found | pair with it | back | — |
-| **Range test** | mark this spot | stop | probe now | talk to the radio under test |
-| *editor* | change value | next field / save | cancel | — |
+The controls are MFruit OS's, the same in every MFruit app and in the
+launcher itself: **tap next · 2 clicks previous · hold (then release)
+open · 4 clicks back**. A hold on a menu only *arms* — the footer changes
+to **release to open** — and acts when you let go.
 
-Four clicks exits from anywhere. **Holding the button talks only inside
-Start** — on the Start menu, the Paired list and Talk — to whoever you
-last chose there: ALL until you pick someone. (And on the Range test, to
-the radio under test, so voice can be tried at each spot.) Home shows who that is
-(`now talking to jarvis`). Everywhere else a hold does nothing and says
-so: menus are for choosing, and a hold that transmitted while you were
-looking for a setting went out to whoever was last chosen, unasked.
-**Receive is for listening** — to what has arrived, and to new messages,
-which still play as they come in — not for talking. The microphone is
-only kept warm where a hold can talk, which also saves power.
+| Screen | tap | 2 clicks | hold | 3 clicks | 4 clicks |
+|---|---|---|---|---|---|
+| **Home** | next row | previous row | open it | Status | leave the app |
+| **Start** | next row | previous row | **talk** | open it | back |
+| **Paired** | next radio | previous radio | **talk** | talk to it | back |
+| **Talk** | Receive | — | **talk** | replay last voice | back |
+| **Receive** | next message | previous message | play it (and fetch any gaps) | play it | back |
+| **Status** | back | — | Settings | Settings | back |
+| **Settings** | next setting | previous setting | open it | — | back |
+| **Pair** | next radio found | previous | pair with it | — | back |
+| **Range test** | mark this spot | — | **talk** to the radio under test | probe now | stop |
+| *editor* | change value | change it back | next field / save | — | cancel |
 
-There are two kinds of screen. **Menus** — Home, Start, Paired, Settings
-and Pair — are lists you pick from, so two clicks opens the highlighted
-row and three goes back. **Views** — Talk, Receive and Status — are
-places you already are, so two clicks leaves. "Back" returns to wherever
-you came from: Receive opened from Talk goes back to Talk, opened from
-Home goes back Home. Three clicks means play wherever there is something
-to play. An empty Receive screen leaves on any click rather than sitting
-there ignoring you.
+**Holding the button talks only inside Start** — on the Start menu, the
+Paired list and Talk — to whoever you last chose there: ALL until you
+pick someone. (And on the Range test, to the radio under test, so voice
+can be tried at each spot.) Home shows who that is (`now talking to
+jarvis`). Because the hold is taken there, **three clicks opens** the
+highlighted row on those screens. Everywhere else a hold opens the row
+and never transmits: menus are for choosing, and a hold that transmitted
+while you were looking for a setting went out to whoever was last
+chosen, unasked. **Receive is for listening** — to what has arrived, and
+to new messages, which still play as they come in — not for talking.
+The microphone is only kept warm where a hold can talk, which also saves
+power.
+
+"Back" returns to wherever you came from: Receive opened from Talk goes
+back to Talk, opened from Home goes back Home. An empty Receive screen
+leaves on any press rather than sitting there ignoring you.
+
+### With a keyboard
+
+Plug in a USB keyboard or pair a Bluetooth one at any time; it is picked
+up within two seconds. The keys are the same in every MFruit app:
+
+| Key | Does |
+|---|---|
+| Down, Right, Tab / Up, Left | next / previous row |
+| Enter | open the row (in an editor: save) |
+| Esc | back; from Home, leave the app |
+| **Space, held** | talk, on the screens where a hold talks |
+| R | replay the last voice (Talk) |
+| P | play the message (Receive); probe now (Range test) |
+| M | mark this spot (Range test) |
+| S | Status (Home) |
+| digits, Backspace | type a Device ID; Backspace steps back a digit |
+| a letter | jump to a name or choice that starts with it (Name, Base, …) |
+
+Keys act only while WalkieTalkie is on screen: typing into another app,
+while the radio keeps listening in the background, never reaches it.
 
 Both the dispatcher and the on-screen hints come from one table in
 [app/ui/navigation.py](app/ui/navigation.py), so a screen cannot
 advertise a gesture the app does not implement — which is exactly how
 the inbox once ended up printing "2 clicks back" while two clicks did
-nothing at all.
+nothing at all. The footer always lists the way back.
 
-The header carries signal strength and a duty-cycle bar that only draws
-attention once the hour's budget is running low.
+The status bar carries the page name, the LoRa signal strength of the
+last station heard, WiFi and battery. The hour's duty-cycle budget is on
+Status, and Talk warns when it is nearly spent.
 
 ---
 
@@ -516,7 +548,7 @@ this radio: orangepizero2w · ID 6235
     code 4821 · waiting for jarvis
 
  ┌──────────────────────────────┐
- │ jarvis                       │   ← 1 click next, 2 clicks pair
+ │ jarvis                       │   ← tap next, hold pairs
  │ ID 1234  ·  strong           │
  └──────────────────────────────┘
 ```
@@ -524,11 +556,11 @@ this radio: orangepizero2w · ID 6235
 1. Each radio announces itself every 3 seconds while the screen is open,
    and lists the other radios it hears doing the same — on any privacy
    channel; a radio on another channel shows its channel (`ch 2`).
-2. On one radio, highlight the other and **2 clicks** to pair. It shows a
+2. On one radio, highlight the other and **hold** (then release) to pair. It shows a
    four-digit **code** and waits.
 3. The other radio asks: *orangepizero2w wants to pair — code 4821*.
-   **Check the code is the same on both screens.** Then click onto
-   **YES** (it starts on **no**) and 2 clicks.
+   **Check the code is the same on both screens.** Then tap onto
+   **YES** (it starts on **no**) and hold to confirm (or press Y, Enter).
 4. Both radios save each other, with keys, and are connected. Each lands
    on the Paired list with the new radio selected. If they were on
    different channels, the one that asked moves to the channel of the one
@@ -542,8 +574,8 @@ would make the two screens show different codes. If they differ, say no.
 A refusal says so (`jarvis said no`), and nothing is saved on either
 side: the radio that asked saves the other only once the answer arrives,
 and only if the answer carries the same key its beacon did. The window
-closes by itself after two minutes, and leaving the screen — 3 clicks,
-or holding to talk — stops it. A radio that is not pairing ignores
+closes by itself after two minutes, and leaving the screen — 4 clicks
+or Esc — stops it. A radio that is not pairing ignores
 beacons and requests, so a stranger nearby can neither show up on your
 lists nor make your radio ask you anything. Two minutes of pairing costs
 a few seconds of the hour's duty-cycle budget.
@@ -652,7 +684,7 @@ eighth of each one.
 ## Settings
 
 Everything that identifies a radio can be set on the device, with the
-button — no editing files over SSH. **Home → Settings.**
+button or a keyboard — no editing files over SSH. **Home → Settings.**
 
 | Setting | What it does |
 |---|---|
@@ -664,14 +696,15 @@ button — no editing files over SSH. **Home → Settings.**
 | **Date & time** | fixes timestamps on a Pi with no RTC |
 | **Reset all data** | erases messages, voice clips, paired radios, keys and settings |
 
-Editors are driven by the same click language: **1 click** changes the
-value under the cursor, **2 clicks** moves to the next field and saves
-on the last one, **3 clicks** cancels everything. Digits are edited
-most-significant first, with the cursor underlined. Hold-to-talk is
-suspended while an editor is open — a hold there would transmit a
-half-typed address, and you are plainly not trying to talk.
+Editors use the same controls: **tap** changes the value under the
+cursor (**2 clicks** changes it back), **hold** moves to the next field
+and saves on the last one, **4 clicks** cancels everything. Digits are
+edited most-significant first, with the cursor underlined. With a
+keyboard, type the digits, **Enter** saves and **Esc** cancels. A hold
+never talks in an editor — it would transmit a half-typed address, and
+you are plainly not trying to talk.
 
-Reset starts on **no**, and you have to click onto **YES** before
+Reset starts on **no**, and you have to tap onto **YES** before
 confirming, so no reflex gesture can wipe the inbox.
 
 Changes are saved to `~/.whisplay-walkie/settings.json`, not back into
@@ -785,7 +818,9 @@ backlight deadline arrives. How:
 ## How it works
 
 ```
-  button ──▶ GestureDetector ──▶ WalkieApp ──▶ ViewState ──▶ screens ──▶ framebuffer
+  button   ─┐
+  keyboard ─┴▶ InputController ──▶ WalkieApp ──▶ ViewState ──▶ screens ──▶ framebuffer
+               (mfruit_sdk)
                                     │
    mic ──▶ arecord ──▶ Codec2 ──────┤
                                     ▼
@@ -803,7 +838,9 @@ backlight deadline arrives. How:
 | [app/radio/airtime.py](app/radio/airtime.py) | Duty-cycle budget |
 | [app/radio/link.py](app/radio/link.py) | Threads, queueing, pacing, peer tracking |
 | [app/audio/codec2.py](app/audio/codec2.py) | `ctypes` binding to libcodec2 |
-| [app/ui/screens.py](app/ui/screens.py) | Pure render functions of `ViewState` |
+| [app/ui/navigation.py](app/ui/navigation.py) | What every input action does on every screen, and the footer hints |
+| [app/ui/screens.py](app/ui/screens.py) | Pure render functions of `ViewState`, in MFruit OS's chrome |
+| [mfruit_sdk/](mfruit_sdk/VENDORED) | MFruit App SDK (vendored): input controller, keyboard, status bar, lists, fonts |
 | [app/main.py](app/main.py) | State machine and the event-driven main loop |
 
 ### On-air format
@@ -857,7 +894,7 @@ of it does. Three things now keep that from ruining it.
 4. **Or asked for again later.** Every radio now keeps what it *sends*
    too (with the rest of Receive, the newest 50 messages), so a message
    that arrived with gaps can be completed afterwards. **Replay it** —
-   Receive, highlight it, three clicks: it plays as it is, and the radio
+   Receive, highlight it, hold (or three clicks): it plays as it is, and the radio
    asks the sender for just the missing parts. When they come the message
    is whole (`voice from jarvis: complete now`) and plays again. Its row
    says `(gaps · play to fix)` beforehand and `(fetching…)` while asking.
@@ -935,7 +972,7 @@ the radio you carry. It probes the other paired radio every 30 seconds
 app only has to be running, on any screen.
 
 ```
-RANGE TEST             to jarvis · every 30s · air 9.6k
+Range                  to jarvis · every 30s · air 9.6k
           80%          8 of the last 10 answered
  ┌ heard here ──┐ ┌ heard there ─┐
  │ -97 dBm ▂▄▆  │ │ -104 dBm ▂▄  │   how I hear it · how it hears me
@@ -947,10 +984,10 @@ RANGE TEST             to jarvis · every 30s · air 9.6k
 
 | | |
 |---|---|
-| **1 click** | mark this spot: a numbered row in the log (and a chirp) |
-| **2 clicks** | stop; the log is kept |
-| **3 clicks** | probe now, without waiting |
-| **hold** | talk to the radio under test, without leaving the screen |
+| **tap** / M | mark this spot: a numbered row in the log (and a chirp) |
+| **4 clicks** / Esc | stop; the log is kept |
+| **3 clicks** / P | probe now, without waiting |
+| **hold** / Space | talk to the radio under test, without leaving the screen |
 
 Every probe is a row in `~/.whisplay-walkie/rangetest/range-<date>.csv`:
 time, answered or not, round trip, signal both ways, and how many probes
@@ -1025,8 +1062,18 @@ The app must be stopped first, since it holds the port:
 ## Testing
 
 ```bash
-python3 -m pytest tests -q     # 554 tests, no hardware required
+python3 -m pytest tests -q     # 574 tests, no hardware required
+python3 tools/preview.py       # every screen to PNG in /tmp/walkie-preview
 ```
+
+`tests/test_controls.py` drives the real MFruit OS input controller (a
+fake clock, no threads) into the app, button and keyboard both.
+
+`mfruit_sdk/` is a copy of MFruit OS's `mfruitos/sdk`: do not edit it
+here. Change it in MFruit OS, then run
+`~/MFruitOS/scripts/sdk-sync.sh ~/WalkieTalkie` (`--check` reports a
+stale copy). The rules every MFruit app follows are in
+`.claude/rules/mfruit-os-app.md`.
 
 Measured on the Pi with the HAT attached, the full audio path runs well
 inside real-time — a 20-second clip encodes in under a second:
@@ -1061,11 +1108,11 @@ a duty-cycle exhaustion — entirely in software.
 | Messages stop arriving at a distance | Signal below the module's sensitivity | See [Range](#range) |
 | `to talk: Home > Start` when holding | A hold only talks inside Start | Home → Start, then hold |
 | `holds M0/M1 ... Run this with sudo` | `provision_radio.py` run without sudo | `sudo python3 provision_radio.py …` |
-| `cannot take M0/M1` when provisioning | Something still holds the lines | Quit the app (four clicks) and retry |
+| `cannot take M0/M1` when provisioning | Something still holds the lines | Quit the app (four clicks from Home, or Esc) and retry |
 | Both radios `disconnected` right after changing `--range` | Only one module changed so far | Provision the other radio with the same `--range` |
 | `jarvis disconnected` while walking | Out of range (or its app closed) | Walk back until `back in range`; see [Range](#range) |
 | `keys changed: pair again` | That radio was reset, or paired elsewhere | Home → Pair devices on both |
-| A message shows `(gaps · play to fix)` | Fragments lost at the edge of range | Receive, three clicks: the missing parts are asked for |
+| A message shows `(gaps · play to fix)` | Fragments lost at the edge of range | Receive, highlight it and hold: the missing parts are asked for |
 | `no answer from jarvis` after replaying | The sender is out of range, off, or no longer has it | Try again once back in range |
 | `radio offline` on screen | Port busy or HAT unseated | `fuser -v /dev/ttyS0` |
 | Nothing received | Frequency or air-rate mismatch | `provision_radio.py --check` on both |

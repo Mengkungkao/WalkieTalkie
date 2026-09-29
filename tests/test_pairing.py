@@ -21,7 +21,7 @@ from app.store.inbox import Inbox
 from app.store.keyring import Keyring
 from app.store.overrides import Overrides
 from app.ui.screens import CONTACTS, EDIT, HOME, PAIR, START
-from tests.test_settings_flow import DOUBLE, SINGLE, TRIPLE, app, open_setting  # noqa: F401
+from tests.test_settings_flow import HOLD, QUAD, TAP, app, open_setting, play  # noqa: F401
 
 JARVIS = 77
 ME = 5
@@ -299,8 +299,7 @@ def test_accepting_saves_the_keys_and_answers_with_ours(radio, jarvis):
     open_pairing(radio)
     request(radio, jarvis)
     radio._prompt_pending_pair()
-    for gesture in (SINGLE, DOUBLE):           # onto YES, then confirm
-        radio._editor_gesture(gesture)
+    play(radio, TAP, HOLD)                     # onto YES, then confirm
 
     assert radio.keyring.peer_broadcast(JARVIS) == jarvis.broadcast_key
     [(_kind, dst, body)] = radio.link.of_type("pair-accept")
@@ -314,7 +313,7 @@ def test_refusing_goes_back_to_pairing(radio, jarvis):
     open_pairing(radio)
     request(radio, jarvis)
     radio._prompt_pending_pair()
-    radio._editor_gesture(TRIPLE)
+    play(radio, QUAD)
     assert ("refuse", JARVIS) in radio.link.sent
     assert not radio.keyring.is_paired(JARVIS)
     assert radio.state.screen == PAIR and radio._pairing
@@ -357,7 +356,7 @@ def test_a_new_device_id_reaches_the_radio_at_once(radio):
     open_setting(radio, "device_id")
     radio.state.editor.cells = [0, 0, 0, 0, 9]
     radio.state.editor.cursor = 4
-    radio._editor_gesture(DOUBLE)
+    play(radio, HOLD)
     assert radio.link.addr == 9
     assert "re-pair" in radio.state.active_banner
 
@@ -451,8 +450,7 @@ def pair_over_the_air(mengpi, jarvis):
     mengpi._pair_selected()
     assert eventually(lambda: jarvis._pending_pair is not None)
     jarvis._prompt_pending_pair()
-    for gesture in (SINGLE, DOUBLE):
-        jarvis._editor_gesture(gesture)
+    play(jarvis, TAP, HOLD)
     # The answer is handled on MengPi's receive thread; wait for all of it.
     assert eventually(lambda: mengpi.state.screen == CONTACTS)
 

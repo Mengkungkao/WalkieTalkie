@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 import time
 
+from mfruit_sdk.ui.rgb565 import to_rgb565
 from PIL import Image, ImageDraw
 
 from app.ui import theme
@@ -28,35 +29,9 @@ from app.utils.logger import get_logger
 
 log = get_logger("display")
 
-try:
-    import numpy as _np
-except ImportError:  # pragma: no cover - optional accelerator
-    _np = None
-
-
-def image_to_rgb565(image: Image.Image) -> bytes:
-    """RGB image -> big-endian RGB565, the daemon's framebuffer format."""
-    if _np is not None:
-        arr = _np.asarray(image.convert("RGB"), dtype=_np.uint16)
-        packed = (
-            ((arr[:, :, 0] & 0xF8) << 8)
-            | ((arr[:, :, 1] & 0xFC) << 3)
-            | (arr[:, :, 2] >> 3)
-        )
-        return packed.astype(">u2").tobytes()
-
-    pixels = image.convert("RGB").tobytes()
-    out = bytearray(len(pixels) // 3 * 2)
-    for index in range(len(pixels) // 3):
-        offset = index * 3
-        value = (
-            ((pixels[offset] & 0xF8) << 8)
-            | ((pixels[offset + 1] & 0xFC) << 3)
-            | (pixels[offset + 2] >> 3)
-        )
-        out[index * 2] = (value >> 8) & 0xFF
-        out[index * 2 + 1] = value & 0xFF
-    return bytes(out)
+# MFruit App SDK's converter: lookup tables merged by Pillow, ~11 ms per
+# frame on a Pi Zero 2 W without numpy's import cost.
+image_to_rgb565 = to_rgb565
 
 
 class Display:

@@ -24,7 +24,7 @@ from app.ui import navigation
 from app.ui.screens import HOME, RANGE, RECORDING
 from tests.test_menu import go_to, press
 from tests.test_retrieve import RetrieveLink
-from tests.test_settings_flow import DOUBLE, SINGLE, TRIPLE, app  # noqa: F401
+from tests.test_settings_flow import QUAD, TAP, THRICE, app  # noqa: F401
 from tools import range_report
 
 
@@ -126,10 +126,10 @@ def test_it_probes_logs_the_answer_and_stops_on_back(radio):
     assert radio.range_test.answered == 1
     assert radio.state.range_view["down"] == -88 and radio.state.range_view["up"] == -93
 
-    press(radio, SINGLE)                       # mark the spot
+    press(radio, TAP)                          # mark the spot
     assert radio.range_test.marks == 1
     path = radio.range_test.path
-    press(radio, DOUBLE)                       # back: the test ends, the log stays
+    press(radio, QUAD)                         # back: the test ends, the log stays
     assert radio.state.screen == HOME and radio.range_test is None
     events = [r["event"] for r in csv.DictReader(open(path, newline=""))]
     assert events == ["start", "probe", "mark", "stop"]
@@ -138,7 +138,7 @@ def test_it_probes_logs_the_answer_and_stops_on_back(radio):
 def test_three_clicks_probes_now(radio):
     go_to(radio, "range")
     radio._range_tick()
-    press(radio, TRIPLE)
+    press(radio, THRICE)
     radio._range_tick()
     assert len(radio.link.pings) == 2
 

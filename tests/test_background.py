@@ -9,13 +9,20 @@ is still alive and still listening.
 from __future__ import annotations
 
 import pytest
+from mfruit_sdk.input import BACK as QUAD  # four clicks, or Esc
 
 from app.config.settings import Settings
 from app.main import WalkieApp
 from app.ui import navigation as nav
-from app.ui.screens import SETTINGS, TALK, ViewState
+from app.ui.screens import HOME, SETTINGS, TALK, ViewState
 
-QUAD = "quad"
+
+class FakeInput:
+    def __init__(self):
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
 
 
 class FakeBoard:
@@ -67,12 +74,14 @@ def app():
     instance._wake = type("Event", (), {"set": lambda self: None})()
     instance._closing = False
     instance.running = True
+    instance.input = FakeInput()
     return instance
 
 
-def test_four_clicks_is_routed_to_exit():
-    assert nav.route(TALK, QUAD) == nav.EXIT_APP
-    assert nav.route(SETTINGS, QUAD) == nav.EXIT_APP
+def test_four_clicks_goes_back_and_leaves_from_home():
+    assert nav.route(HOME, QUAD) == nav.EXIT_APP
+    assert nav.route(TALK, QUAD) == nav.GO_BACK
+    assert nav.route(SETTINGS, QUAD) == nav.GO_BACK
 
 
 def test_stopping_sets_the_loop_to_finish(app):
@@ -87,6 +96,12 @@ def test_losing_focus_does_not_stop_the_radio(app):
     assert app.link.stopped is False
     assert app.running is True
     assert app.board.foreground_ready is False
+
+
+def test_losing_focus_forgets_input_in_progress(app):
+    """Keys typed into whatever has the screen now must not reach the radio."""
+    app._on_focus_revoked()
+    assert app.input.resets == 1
 
 
 def test_losing_focus_while_closing_is_ignored(app):

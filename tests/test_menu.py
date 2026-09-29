@@ -6,8 +6,10 @@
            Pair devices                -> see test_pairing
            Settings                    -> name, ID, privacy channel ...
 
-Gestures are pressed through the same dispatcher the button uses, so the
-tests follow what an operator's clicks actually do.
+Input goes through the same handler the MFruit OS input controller calls
+(`_on_action`), so the tests follow what an operator's presses and keys
+actually do: tap next, 2 clicks previous, hold open, 4 clicks back -- and
+on talk screens, where a hold talks, 3 clicks opens.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from app.store.keyring import Keyring
 from app.store.roster import Roster
 from app.ui.screens import CONTACTS, HOME, INBOX, SETTINGS, START, STATUS, TALK
 from tests.test_pairing import FakeLink
-from tests.test_settings_flow import DOUBLE, SINGLE, TRIPLE, app  # noqa: F401
+from tests.test_settings_flow import HOLD, QUAD, TAP, THRICE, TWICE, act, app  # noqa: F401
 
 
 @pytest.fixture
@@ -44,17 +46,20 @@ def radio(app, tmp_path):
     return app
 
 
-def press(app, *gestures):
-    for gesture in gestures:
-        app._on_gesture(gesture)
+press = act
 
 
 def go_to(app, key):
-    """Click down the current menu to the row `key`, then open it."""
+    """Tap down the current menu to the row `key`, then open it.
+
+    Home opens with a hold; Start is a talk screen, where the hold talks,
+    so its rows open with three clicks.
+    """
     items = app.state.home_items if app.state.screen == HOME else app.state.start_items
     keys = [item["key"] for item in items]
     index = app.state.home_index if app.state.screen == HOME else app.state.start_index
-    press(app, *[SINGLE] * ((keys.index(key) - index) % len(keys)), DOUBLE)
+    opener = HOLD if app.state.screen == HOME else THRICE
+    press(app, *[TAP] * ((keys.index(key) - index) % len(keys)), opener)
 
 
 def test_the_app_opens_on_home(radio):
@@ -80,10 +85,12 @@ def test_to_all_opens_talk_on_everyone(radio):
 def test_back_retraces_the_way_in(radio):
     go_to(radio, "start")
     go_to(radio, "all")
-    press(radio, DOUBLE)                       # Talk: two clicks back
+    press(radio, QUAD)                         # Talk: four clicks back
     assert radio.state.screen == START
-    press(radio, TRIPLE)                       # a menu: three clicks back
+    press(radio, QUAD)                         # Start: four clicks back
     assert radio.state.screen == HOME
+    press(radio, QUAD)                         # Home: four clicks leave the app
+    assert radio._exit_reason == "user" and not radio.running
 
 
 def test_a_paired_device_is_picked_from_the_list(radio):
@@ -91,18 +98,18 @@ def test_a_paired_device_is_picked_from_the_list(radio):
     go_to(radio, "device")
     assert radio.state.screen == CONTACTS
     assert [e.address for e in radio.state.entries] == [1, 9]
-    press(radio, DOUBLE)                       # talk to the first: Base
+    press(radio, THRICE)                       # talk to the first: Base
     assert radio.state.screen == TALK
     assert radio._target == (1, "Base")
     assert ("hello", 1) in radio.link.sent     # calls it to check the link
-    press(radio, DOUBLE)
+    press(radio, QUAD)
     assert radio.state.screen == CONTACTS
 
 
 def test_a_contact_without_keys_cannot_be_talked_to(radio):
     go_to(radio, "start")
     go_to(radio, "device")
-    press(radio, SINGLE, DOUBLE)               # Hilltop
+    press(radio, TAP, THRICE)                  # Hilltop
     assert radio.state.screen == CONTACTS
     assert "pair with Hilltop first" in radio.state.active_banner
     assert 9 in radio.state.unpaired
@@ -111,37 +118,44 @@ def test_a_contact_without_keys_cannot_be_talked_to(radio):
 def test_receive_opens_from_home_and_goes_back_there(radio):
     go_to(radio, "receive")
     assert radio.state.screen == INBOX
-    press(radio, DOUBLE)
+    press(radio, QUAD)
     assert radio.state.screen == HOME
 
 
 def test_receive_from_talk_goes_back_to_talk(radio):
     go_to(radio, "start")
     go_to(radio, "all")
-    press(radio, SINGLE)                       # Talk: one click, Receive
+    press(radio, TAP)                          # Talk: one click, Receive
     assert radio.state.screen == INBOX
-    press(radio, DOUBLE)
+    press(radio, QUAD)
     assert radio.state.screen == TALK
 
 
 def test_settings_opens_from_home(radio):
     go_to(radio, "settings")
     assert radio.state.screen == SETTINGS
-    press(radio, TRIPLE)
+    press(radio, QUAD)
     assert radio.state.screen == HOME
 
 
 def test_three_clicks_on_home_shows_status(radio):
-    press(radio, TRIPLE)
+    press(radio, THRICE)
     assert radio.state.screen == STATUS
-    press(radio, SINGLE)
+    press(radio, TAP)
     assert radio.state.screen == HOME
+
+
+def test_lists_step_back_with_two_clicks(radio):
+    press(radio, TAP, TAP)
+    assert radio.state.home_index == 2
+    press(radio, TWICE)
+    assert radio.state.home_index == 1
 
 
 def test_home_says_who_holding_the_button_talks_to(radio):
     go_to(radio, "start")
     go_to(radio, "device")
-    press(radio, DOUBLE)
+    press(radio, THRICE)
     radio._refresh_menus()
     assert "Base" in radio.state.home_items[0]["value"]
 

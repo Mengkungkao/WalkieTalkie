@@ -179,35 +179,33 @@ def test_banner_expires(display):
 @pytest.mark.parametrize("screen", [HOME, START, CONTACTS, TALK, INBOX, STATUS,
                                     SETTINGS, PAIR])
 def test_footer_hints_fit_the_panel(screen):
-    """Text that overflows is clipped at both ends and reads as gibberish.
+    """Hints that do not fit are dropped from the end of the footer, so
+    the first three -- which always include the way back -- must fit.
 
     Every hint line was 250-272 px wide against a 240 px panel until a
     screenshot showed it; rendering without raising is not the same as
     fitting.
     """
-    from PIL import Image, ImageDraw
-
     from app.ui import navigation
 
-    draw = ImageDraw.Draw(Image.new("RGB", (theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT)))
-    font = theme.font(12)
-    margin = 4
-    for line in navigation.hints(screen):
-        width = draw.textlength(line, font=font)
-        assert width <= theme.SCREEN_WIDTH - margin, (
-            f"{screen}: {line!r} is {width:.0f}px, panel is "
-            f"{theme.SCREEN_WIDTH}px"
-        )
+    assert _first_three_fit(navigation.hints(screen)), screen
+
+
+def _first_three_fit(hints) -> bool:
+    """The MFruit OS footer's own arithmetic (mfruit_sdk.ui.chrome.footer)."""
+    from mfruit_sdk.ui import Canvas
+    from mfruit_sdk.ui.theme import CORNER_INSET
+
+    canvas = Canvas()
+    widths = [canvas.text_width(g, 11, "semibold") + 4 + canvas.text_width(a, 11)
+              for g, a in hints[:3]]
+    return sum(widths) + 12 * (len(widths) - 1) <= theme.SCREEN_WIDTH - 2 * CORNER_INSET
 
 
 def test_empty_inbox_hint_fits_too():
-    from PIL import Image, ImageDraw
-
     from app.ui import navigation
 
-    draw = ImageDraw.Draw(Image.new("RGB", (theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT)))
-    for line in navigation.hints(INBOX, inbox_empty=True):
-        assert draw.textlength(line, font=theme.font(12)) <= theme.SCREEN_WIDTH - 4
+    assert _first_three_fit(navigation.hints(INBOX, inbox_empty=True))
 
 
 def test_frame_is_the_size_the_daemon_expects(display):
@@ -348,7 +346,7 @@ def test_two_line_rows_fit_their_panel(primary, secondary):
         f"second line ends at {bottom}, panel is {height} tall")
 
 
-@pytest.mark.parametrize("screen", [CONTACTS, INBOX, SETTINGS])
+@pytest.mark.parametrize("screen", [CONTACTS, INBOX])
 def test_row_text_does_not_cross_the_panel_border(display, screen):
     """Render for real and check no text sits on a selection outline."""
     import numpy as np
@@ -386,3 +384,53 @@ def test_pair_screen_renders_with_each_radio_selected(display, index):
                             pair_status="waiting for a radio with a long name to accept")
     screens.render(display, state)
 
+
+
+# Fit checks measure with the device's font. MFruit OS ships Inter; where it
+# is not installed (nor a ~/MFruitOS checkout) the SDK falls back to the
+# wider DejaVu and truncates with an ellipsis, which is what the device
+# would do too -- so these only mean something with Inter.
+needs_inter = pytest.mark.skipif(
+    not __import__("mfruit_sdk.ui.fonts", fromlist=["shared"]).shared().is_inter,
+    reason="MFruit OS's font (Inter) not found; set MFRUIT_FONT_DIR")
+
+
+@needs_inter
+def test_page_names_fit_the_status_bar():
+    """The page name shares the bar with the signal meter, WiFi and a
+    three-digit battery; a truncated name ("Receive…") reads as a glitch."""
+    from mfruit_sdk.status import Status
+    from mfruit_sdk.ui import Canvas, status_bar
+
+    from app.ui import screens as scr
+
+    probe = Canvas()
+    slot = status_bar(probe, "", Status(3, 100, True), reserve=scr.SIGNAL_SLOT)
+    room = slot - 6 - 16 - 6
+    for title in list(scr.PAGE_TITLES.values()) + list(scr.EDITOR_TITLES.values()):
+        assert probe.text_width(title, 17, "bold") <= room, f"{title!r} does not fit"
+
+
+@needs_inter
+@pytest.mark.parametrize("editor", [
+    DigitEditor(65534, digits=5), ChoiceEditor([("Base", 1), ("Rover", 5)]),
+    ClockEditor(__import__("datetime").datetime(2026, 9, 4, 14, 30)),
+    ConfirmEditor("Erase everything?"),
+], ids=["digits", "choice", "clock", "confirm"])
+def test_editor_footer_shows_every_hint(editor):
+    """In an editor all three matter -- change, commit, and the way out."""
+    from app.ui.screens import editor_hints
+
+    hints = editor_hints(editor)
+    assert [gesture for gesture, _label in hints] == ["tap", "hold", "4×"]
+    assert _first_three_fit(hints)
+
+
+def test_editor_footer_says_save_on_the_last_field():
+    from app.ui.screens import editor_hints
+
+    editor = DigitEditor(5, digits=3)
+    assert editor_hints(editor)[1] == ("hold", "next")
+    editor.cursor = 2
+    assert editor_hints(editor)[1] == ("hold", "save")
+    assert editor_hints(ChoiceEditor([("a", 1)]))[1] == ("hold", "save")

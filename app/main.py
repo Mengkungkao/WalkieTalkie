@@ -3,11 +3,15 @@
 A push-to-talk voice and text terminal for the Whisplay HAT and a
 Waveshare SX126X LoRa HAT on one Pi Zero 2 W.
 
-    hold the button   record, then encode and transmit
-    1 click           next item / next screen
-    2 clicks          open, play, or go back
-    3 clicks          replay the last voice message
-    4 clicks          leave the app
+The controls are MFruit OS's, the same in every MFruit app (the button
+and any USB or Bluetooth keyboard, through mfruit_sdk.input):
+
+    tap / Down           next row
+    2 clicks / Up        previous row
+    hold, release / Enter  open the row
+    4 clicks / Esc       back; from Home, leave the app
+    hold / Space         talk, on the talk screens (Start, its contacts,
+                         Talk, Range test) -- there 3 clicks opens the row
 
 **The main loop does not poll.** It renders, works out when the next
 thing genuinely needs to happen, and blocks on an Event until either
@@ -35,7 +39,11 @@ from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
 from app.audio.playback import CUE_ERROR, Player, cues_for, voice_for
 from app.config import settings as settings_module
 from app.config.settings import Contact
-from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE, GestureDetector
+from mfruit_sdk.daemon import own_escape_key
+from mfruit_sdk.input import (BACK, CHAR, KEYBOARD, TALK_END, TALK_START,
+                              InputController)
+from mfruit_sdk.status import StatusMonitor
+
 from app.radio import linkcheck, protocol
 from app.radio import modepins
 from app.config.settings import hostname_callsign
@@ -161,15 +169,19 @@ class WalkieApp:
             max_record_seconds=settings.audio.max_record_seconds,
         )
 
-        self.gestures = GestureDetector(
-            on_gesture=self._on_gesture,
-            on_hold_start=self._on_talk_start,
-            on_hold_end=self._on_talk_end,
+        # The button and any USB / Bluetooth keyboard, as MFruit OS actions.
+        self.input = InputController(
+            self._on_action,
+            talk=lambda: navigation.can_talk(self.state.screen),
+            active=lambda: self.foregrounded,
+            on_armed=self._on_armed,
             debounce_ms=settings.input.debounce_ms,
             click_window_ms=settings.input.click_window_ms,
-            hold_ms=settings.input.hold_ms,
+            long_press_ms=settings.input.hold_ms,
         )
-        self.gestures.attach(self.board)
+        self.input.attach(self.board)
+        # WiFi level for the MFruit OS status bar (battery comes from app.utils.battery).
+        self.status = StatusMonitor(interval=15.0, on_change=lambda _s: self._wake.set())
         for hook, handler in (("on_exit_request", self._on_exit_request),
                               ("on_focus_revoked", self._on_focus_revoked)):
             if hasattr(self.board, hook):
@@ -385,27 +397,47 @@ class WalkieApp:
             self.board.foreground_ready = False
         except Exception:
             pass
+        # Keys typed into whatever has the screen now are not ours.
+        self.input.reset()
 
-    # --- gestures ------------------------------------------------------
-    def _on_gesture(self, gesture: str):
+    # --- input -----------------------------------------------------------
+    def _on_armed(self, armed: bool):
+        """A hold passed the threshold off a talk screen: show what release does."""
+        self.state.armed = armed
+        self._wake.set()
+
+    def _on_action(self, action):
+        """One MFruit OS input action, from the button or a keyboard."""
+        if action.name == TALK_START:
+            self._on_talk_start()
+            return
+        if action.name == TALK_END:
+            self._on_talk_end(action.held)
+            return
         # A press on a blanked screen means "wake up", not "do the thing
         # that happens to be under the cursor". Acting on a gesture the
         # operator could not see the target of is how you end up
         # transmitting to the wrong station.
         was_dark = self.display.screen_off
         self.display.poke()
-        if was_dark and gesture != QUAD:
-            log.info("gesture %s consumed waking the screen", gesture)
+        if was_dark and action.name != BACK:
+            log.info("%s consumed waking the screen", action.name)
             self._wake.set()
             return
         if self.state.screen == EDIT and self.state.editor is not None:
-            self._editor_gesture(gesture)
+            self._editor_action(action)
             self._wake.set()
             return
 
-        action = navigation.route(
-            self.state.screen, gesture, inbox_empty=not self.inbox.items
-        )
+        if action.name == CHAR:
+            name = navigation.route_char(self.state.screen, action.char)
+        else:
+            name = navigation.route(
+                self.state.screen, action.name, inbox_empty=not self.inbox.items
+            )
+        self._dispatch(name)
+
+    def _dispatch(self, action):
         if action is None:
             return
         if action == navigation.EXIT_APP:
@@ -422,18 +454,23 @@ class WalkieApp:
         """Action name -> what it does. Keys must cover navigation's table."""
         return {
             navigation.NEXT_ITEM: self._next_item,
+            navigation.PREVIOUS_ITEM: lambda: self._next_item(-1),
             navigation.OPEN_ITEM: self._open_item,
             navigation.NEXT_CONTACT: self._next_contact,
+            navigation.PREVIOUS_CONTACT: lambda: self._next_contact(-1),
             navigation.OPEN_TALK: self._open_talk,
             navigation.OPEN_INBOX: self._open_inbox,
             navigation.OPEN_STATUS: lambda: self._show(STATUS),
             navigation.NEXT_MESSAGE: self._next_message,
+            navigation.PREVIOUS_MESSAGE: lambda: self._next_message(-1),
             navigation.PLAY_SELECTED: self._play_selected,
             navigation.REPLAY_LAST: self._replay_last,
             navigation.OPEN_SETTINGS: self._open_settings,
             navigation.NEXT_SETTING: self._next_setting,
+            navigation.PREVIOUS_SETTING: lambda: self._next_setting(-1),
             navigation.OPEN_SETTING: self._open_setting,
             navigation.NEXT_FOUND: self._next_found,
+            navigation.PREVIOUS_FOUND: lambda: self._next_found(-1),
             navigation.PAIR_SELECTED: self._pair_selected,
             navigation.MARK_SPOT: self._mark_spot,
             navigation.PROBE_NOW: self._probe_now,
@@ -505,11 +542,11 @@ class WalkieApp:
         self.state.home_items = self._home_items()
         self.state.start_items = self._start_items()
 
-    def _next_item(self):
+    def _next_item(self, step: int = 1):
         if self.state.screen == HOME:
-            self.state.home_index = (self.state.home_index + 1) % len(self.state.home_items)
+            self.state.home_index = (self.state.home_index + step) % len(self.state.home_items)
         elif self.state.screen == START:
-            self.state.start_index = (self.state.start_index + 1) % len(self.state.start_items)
+            self.state.start_index = (self.state.start_index + step) % len(self.state.start_items)
 
     def _open_item(self):
         if self.state.screen == HOME:
@@ -549,8 +586,8 @@ class WalkieApp:
             return
         self._talk_to(entry.address, entry.name)
 
-    def _next_contact(self):
-        if self.roster.advance() is None:
+    def _next_contact(self, step: int = 1):
+        if self.roster.advance(step) is None:
             self.state.flash("no paired radios yet")
         self._refresh_entries()
 
@@ -558,10 +595,10 @@ class WalkieApp:
         self._show(INBOX)
         self.state.inbox_index = 0
 
-    def _next_message(self):
+    def _next_message(self, step: int = 1):
         if self.inbox.items:
             self.state.inbox_index = (
-                self.state.inbox_index + 1) % len(self.inbox.items)
+                self.state.inbox_index + step) % len(self.inbox.items)
 
     # --- handshake ----------------------------------------------------------
     def _on_hello(self, peer, name: str):
@@ -636,9 +673,9 @@ class WalkieApp:
         self.state.settings_index = 0
         self.state.settings_items = self._settings_items()
 
-    def _next_setting(self):
+    def _next_setting(self, step: int = 1):
         items = self.state.settings_items or self._settings_items()
-        self.state.settings_index = (self.state.settings_index + 1) % len(items)
+        self.state.settings_index = (self.state.settings_index + step) % len(items)
 
     def _refresh_settings(self):
         self.state.settings_items = self._settings_items()
@@ -731,9 +768,9 @@ class WalkieApp:
             "RESET",
         )
 
-    def _editor_gesture(self, gesture: str):
+    def _editor_action(self, action):
         editor = self.state.editor
-        if not editor.handle(gesture):
+        if not editor.handle(action.name, action.char, keyboard=action.source == KEYBOARD):
             return
         title = self.state.editor_title
         self.state.editor = None
@@ -920,12 +957,12 @@ class WalkieApp:
         self.state.pair_channels = {addr: info.get("channel")
                                     for addr, info in (self._pair_found or {}).items()}
 
-    def _next_found(self):
+    def _next_found(self, step: int = 1):
         found = self.state.pair_found
         if not found:
             self.state.flash("none found yet")
             return
-        self.state.pair_index = (self.state.pair_index + 1) % len(found)
+        self.state.pair_index = (self.state.pair_index + step) % len(found)
 
     def _pair_selected(self):
         found = self.state.pair_found
@@ -1805,6 +1842,7 @@ class WalkieApp:
 
     # --- main loop -------------------------------------------------------
     def _sync_state(self):
+        self.state.wifi_level = self.status.sample().wifi_level
         if self.recorder.recording:
             self.state.record_level = self.recorder.level
             self.state.record_seconds = self.recorder.elapsed
@@ -1872,6 +1910,7 @@ class WalkieApp:
         self.state.battery_summary = power.compact()
         self.state.battery_detail = power.summary()
         self.state.battery_percent = power.percent
+        self.state.battery_charging = bool(getattr(power, "charging", False))
         self.state.battery_low = power.low
         if power.critical and not self._warned_critical:
             self._warned_critical = True
@@ -1955,7 +1994,10 @@ class WalkieApp:
             self.mode, "ok" if self.link else "offline",
             self.state.audio_note, self.state.codec_name,
         )
-        self.gestures.start()
+        if self.mode in ("daemon", "waiting"):
+            own_escape_key(board_module.APP_ID)   # Esc is "back" in here
+        self.input.start()
+        self.status.start()
         # Warm the codec now: a cold open costs ~690 ms of lost speech,
         # and the operator may press talk the moment the app appears.
         if self.recorder.available:
@@ -2013,7 +2055,8 @@ class WalkieApp:
             self.player.stop()
         except Exception:
             pass
-        self.gestures.stop()
+        self.input.stop()
+        self.status.stop()
         if self.link is not None:
             self.link.stop()
         if self.radio is not None:

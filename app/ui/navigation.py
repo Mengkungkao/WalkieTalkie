@@ -1,46 +1,54 @@
-"""One table describing what every gesture does on every screen.
+"""One table describing what every action does on every screen.
 
-This exists because the inbox screen printed "2 clicks back" in its
+This exists because the inbox screen once printed "2 clicks back" in its
 footer while the handler routed two clicks to *play*, which returned
-silently when there was nothing to play. On an empty inbox -- the
-normal state of a radio that has not received anything yet -- one click
-was a guarded no-op, two clicks did nothing, and only three clicks went
-back, which the screen never mentioned. The operator was stuck on a
-screen that was telling them the wrong way out.
+silently when there was nothing to play. The footer and the dispatcher
+had been written separately, so they were free to disagree. Here they
+cannot: `route()` drives the handler and `hints()` renders the footer,
+both from `SCREEN_ACTIONS`.
 
-The footer and the dispatcher had been written separately, so they were
-free to disagree. Here they cannot: `actions()` drives the handler and
-`hints()` renders the labels, both from `SCREEN_ACTIONS`.
+The actions are MFruit OS's (mfruit_sdk.input), the same in every MFruit
+app, so nothing is relearned between apps:
 
-The invariant worth keeping is that **two clicks always means back**.
-It held on Talk and Status, and the inbox was the one screen that broke
-it -- which is exactly where a user gets lost. Play moved to three
-clicks, where it now matches Talk's "three clicks replays the last
-message": three clicks means play on every screen that has anything to
-play.
+    next      tap              Down / Right / Tab
+    previous  2 clicks         Up / Left
+    select    hold, release    Enter
+    extra     3 clicks         (a letter; see CHAR_ACTIONS)
+    back      4 clicks         Esc
+
+Menus and lists follow it exactly: tap next, 2 clicks previous, hold
+opens, 4 clicks back. **Talk screens** (`TALK_SCREENS`) are where holding
+the button -- or Space -- talks, so there three clicks opens the selected
+row instead. Back from Home leaves the app.
 """
 
 from __future__ import annotations
 
-from app.input.button import DOUBLE, QUAD, SINGLE, TRIPLE
+from mfruit_sdk.input import BACK, EXTRA, NEXT, PREVIOUS, SELECT
+
 from app.ui.screens import (CONTACTS, EDIT, HOME, INBOX, PAIR, RANGE, SETTINGS,
                             START, STATUS, TALK)
 
 # Actions the app implements. Names, not callables, so this module stays
 # free of app state and can be imported by the screens.
 NEXT_ITEM = "next_item"          # Home and Start
+PREVIOUS_ITEM = "previous_item"
 OPEN_ITEM = "open_item"
 NEXT_CONTACT = "next_contact"
+PREVIOUS_CONTACT = "previous_contact"
 OPEN_TALK = "open_talk"
 OPEN_INBOX = "open_inbox"
 OPEN_STATUS = "open_status"
 NEXT_MESSAGE = "next_message"
+PREVIOUS_MESSAGE = "previous_message"
 PLAY_SELECTED = "play_selected"
 REPLAY_LAST = "replay_last"
 OPEN_SETTINGS = "open_settings"
 NEXT_SETTING = "next_setting"
+PREVIOUS_SETTING = "previous_setting"
 OPEN_SETTING = "open_setting"
 NEXT_FOUND = "next_found"
+PREVIOUS_FOUND = "previous_found"
 PAIR_SELECTED = "pair_selected"
 MARK_SPOT = "mark_spot"          # range test: note where you are, in the log
 PROBE_NOW = "probe_now"          # range test: don't wait for the timer
@@ -50,8 +58,7 @@ PROBE_NOW = "probe_now"          # range test: don't wait for the timer
 GO_BACK = "go_back"
 EXIT_APP = "exit_app"
 
-# Screens you pick from, rather than screens you are in. Two clicks opens
-# a row here and leaves everywhere else.
+# Screens you pick from, rather than screens you are in.
 MENU_SCREENS = (HOME, START, CONTACTS, SETTINGS, PAIR)
 
 # Actions that move to a different screen. Used to check that no screen
@@ -61,75 +68,96 @@ LEAVING_ACTIONS = {
     GO_BACK, EXIT_APP,
 }
 
-# gesture -> (action, short label for the on-screen hint)
+# action -> (what it does here, short label for the footer)
 SCREEN_ACTIONS = {
-    # The app opens here. There is nowhere to go back to, so three clicks
-    # shows Status, as it did from the old contacts screen.
+    # The app opens here; back leaves the app.
     HOME: {
-        SINGLE: (NEXT_ITEM, "next"),
-        DOUBLE: (OPEN_ITEM, "open"),
-        TRIPLE: (OPEN_STATUS, "status"),
+        NEXT: (NEXT_ITEM, "next"),
+        PREVIOUS: (PREVIOUS_ITEM, "previous"),
+        SELECT: (OPEN_ITEM, "open"),
+        EXTRA: (OPEN_STATUS, "status"),
+        BACK: (EXIT_APP, "exit"),
     },
     START: {
-        SINGLE: (NEXT_ITEM, "next"),
-        DOUBLE: (OPEN_ITEM, "open"),
-        TRIPLE: (GO_BACK, "back"),
+        NEXT: (NEXT_ITEM, "next"),
+        PREVIOUS: (PREVIOUS_ITEM, "previous"),
+        SELECT: (OPEN_ITEM, "open"),
+        EXTRA: (OPEN_ITEM, "open"),
+        BACK: (GO_BACK, "back"),
     },
     CONTACTS: {
-        SINGLE: (NEXT_CONTACT, "next"),
-        DOUBLE: (OPEN_TALK, "talk"),
-        TRIPLE: (GO_BACK, "back"),
+        NEXT: (NEXT_CONTACT, "next"),
+        PREVIOUS: (PREVIOUS_CONTACT, "previous"),
+        SELECT: (OPEN_TALK, "talk to"),
+        EXTRA: (OPEN_TALK, "talk to"),
+        BACK: (GO_BACK, "back"),
     },
     TALK: {
-        SINGLE: (OPEN_INBOX, "receive"),
-        DOUBLE: (GO_BACK, "back"),
-        TRIPLE: (REPLAY_LAST, "replay"),
+        NEXT: (OPEN_INBOX, "receive"),
+        SELECT: (OPEN_INBOX, "receive"),
+        EXTRA: (REPLAY_LAST, "replay"),
+        BACK: (GO_BACK, "back"),
     },
     INBOX: {
-        SINGLE: (NEXT_MESSAGE, "next"),
-        DOUBLE: (GO_BACK, "back"),
-        TRIPLE: (PLAY_SELECTED, "play"),
+        NEXT: (NEXT_MESSAGE, "next"),
+        PREVIOUS: (PREVIOUS_MESSAGE, "previous"),
+        SELECT: (PLAY_SELECTED, "play"),
+        EXTRA: (PLAY_SELECTED, "play"),
+        BACK: (GO_BACK, "back"),
     },
     STATUS: {
-        SINGLE: (GO_BACK, "back"),
-        DOUBLE: (GO_BACK, "back"),
-        TRIPLE: (OPEN_SETTINGS, "settings"),
+        NEXT: (GO_BACK, "back"),
+        SELECT: (OPEN_SETTINGS, "settings"),
+        EXTRA: (OPEN_SETTINGS, "settings"),
+        BACK: (GO_BACK, "back"),
     },
     SETTINGS: {
-        SINGLE: (NEXT_SETTING, "next"),
-        DOUBLE: (OPEN_SETTING, "open"),
-        TRIPLE: (GO_BACK, "back"),
+        NEXT: (NEXT_SETTING, "next"),
+        PREVIOUS: (PREVIOUS_SETTING, "previous"),
+        SELECT: (OPEN_SETTING, "open"),
+        BACK: (GO_BACK, "back"),
     },
-    # A menu of the radios heard pairing: two clicks picks one.
+    # A menu of the radios heard pairing: hold pairs with one.
     PAIR: {
-        SINGLE: (NEXT_FOUND, "next"),
-        DOUBLE: (PAIR_SELECTED, "pair"),
-        TRIPLE: (GO_BACK, "back"),
+        NEXT: (NEXT_FOUND, "next"),
+        PREVIOUS: (PREVIOUS_FOUND, "previous"),
+        SELECT: (PAIR_SELECTED, "pair"),
+        BACK: (GO_BACK, "back"),
     },
     # Carried on a walk: one click marks the spot, the easiest gesture to
-    # make with the radio in a pocket. Two clicks, as everywhere, is back,
-    # which ends the test.
+    # make with the radio in a pocket. Back ends the test.
     RANGE: {
-        SINGLE: (MARK_SPOT, "mark"),
-        DOUBLE: (GO_BACK, "stop"),
-        TRIPLE: (PROBE_NOW, "probe"),
+        NEXT: (MARK_SPOT, "mark"),
+        SELECT: (MARK_SPOT, "mark"),
+        EXTRA: (PROBE_NOW, "probe"),
+        BACK: (GO_BACK, "stop"),
     },
 }
 
 # An empty inbox has nothing to step through and nothing to play, so
-# every click leaves rather than silently doing nothing.
+# every action leaves rather than silently doing nothing.
 EMPTY_INBOX_ACTIONS = {
-    SINGLE: (GO_BACK, "back"),
-    DOUBLE: (GO_BACK, "back"),
-    TRIPLE: (GO_BACK, "back"),
+    NEXT: (GO_BACK, "back"),
+    PREVIOUS: (GO_BACK, "back"),
+    SELECT: (GO_BACK, "back"),
+    EXTRA: (GO_BACK, "back"),
+    BACK: (GO_BACK, "back"),
 }
 
-# Where holding the button talks: inside Start -- choosing who to talk
-# to, and talking -- and on the range test, to the radio under test, so
-# voice can be tried at each spot. Everywhere else a hold does nothing.
-# Menus are for choosing, and a hold that transmitted while you were
-# looking for a setting went out to whoever was last chosen, unasked.
-# Receive is for listening back to what came in.
+# Keyboard letters for the actions that are three clicks on the button.
+CHAR_ACTIONS = {
+    HOME: {"s": OPEN_STATUS},
+    TALK: {"r": REPLAY_LAST},
+    INBOX: {"p": PLAY_SELECTED},
+    RANGE: {"p": PROBE_NOW, "m": MARK_SPOT},
+}
+
+# Where holding the button (or Space) talks: inside Start -- choosing who
+# to talk to, and talking -- and on the range test, to the radio under
+# test, so voice can be tried at each spot. Everywhere else a hold opens
+# the selected row. Menus are for choosing, and a hold that transmitted
+# while you were looking for a setting went out to whoever was last
+# chosen, unasked. Receive is for listening back to what came in.
 TALK_SCREENS = frozenset({START, CONTACTS, TALK, RANGE})
 
 
@@ -137,66 +165,61 @@ def can_talk(screen: str) -> bool:
     return screen in TALK_SCREENS
 
 
-# Four clicks exits from anywhere; the way out must not depend on where
-# you happen to be.
-#
-# Exiting closes the serial port, so the radio stops listening until the
-# app is opened again. That is the deliberate trade: the app is a thing
-# you open when you want it, not a service running behind the desktop.
-GLOBAL_ACTIONS = {QUAD: (EXIT_APP, "exit")}
-
-
 def actions(screen: str, inbox_empty: bool = False) -> dict:
-    """The gesture -> (action, label) map in force for this screen.
+    """The action -> (what it does, label) map in force for this screen.
 
-    EDIT is absent on purpose: a modal editor routes gestures to itself
-    rather than through this table, so asking for its actions is a bug.
+    EDIT is absent on purpose: a modal editor routes input to itself
+    rather than through this table, so it has no actions here.
     """
     if screen == EDIT:
-        return dict(GLOBAL_ACTIONS)
+        return {}
     if screen == INBOX and inbox_empty:
-        table = dict(EMPTY_INBOX_ACTIONS)
-    else:
-        table = dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[HOME]))
-    table.update(GLOBAL_ACTIONS)
-    return table
+        return dict(EMPTY_INBOX_ACTIONS)
+    return dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[HOME]))
 
 
-def route(screen: str, gesture: str, inbox_empty: bool = False):
-    """The action a gesture triggers here, or None if it does nothing."""
-    entry = actions(screen, inbox_empty).get(gesture)
+def route(screen: str, action: str, inbox_empty: bool = False):
+    """What an input action does here, or None if it does nothing."""
+    entry = actions(screen, inbox_empty).get(action)
     return entry[0] if entry else None
 
 
-_CLICK_WORD = {SINGLE: "1 click", DOUBLE: "2 clicks", TRIPLE: "3 clicks",
-               QUAD: "4 clicks"}
+def route_char(screen: str, char: str):
+    """What a typed letter does here, or None."""
+    return CHAR_ACTIONS.get(screen, {}).get(char.lower())
 
 
-def hints(screen: str, inbox_empty: bool = False) -> list:
-    """Footer lines describing this screen's gestures.
+_GESTURE = {NEXT: "tap", PREVIOUS: "2×", SELECT: "hold", EXTRA: "3×", BACK: "4×"}
 
-    Generated from the same table the dispatcher uses, so the screen
-    cannot advertise a gesture the app does not implement.
+
+def hints(screen: str, inbox_empty: bool = False, armed: bool = False) -> list:
+    """Footer hints, [(gesture, label)], from the same table as `route`.
+
+    Most important first, because the footer drops what does not fit
+    from the end: on a talk screen "hold talk" leads; the way back is
+    always within the first three.
     """
     table = actions(screen, inbox_empty)
-    parts = [
-        f"{_CLICK_WORD[g]} {table[g][1]}"
-        for g in (SINGLE, DOUBLE, TRIPLE) if g in table
-    ]
-    # Collapse "1 click back · 2 clicks back · 3 clicks back".
-    labels = {table[g][1] for g in (SINGLE, DOUBLE, TRIPLE) if g in table}
-    if len(labels) == 1:
-        parts = [f"any click {labels.pop()}"]
-
-    # The second line carries three items, so the trailing two are
-    # abbreviated. Spelled out ("hold to talk · 4 clicks exit") it runs to
-    # 272 px against a 236 px panel and is clipped at both ends -- which
-    # is exactly how it shipped until someone looked at a screenshot.
-    # Read the global label from the table rather than repeating it: a
-    # hardcoded "4 exit" survived four clicks being changed to hide the
-    # app, which is exactly the drift this module exists to prevent.
-    global_label = table[QUAD][1] if QUAD in table else "hide"
-    first = "  ·  ".join(parts[:2])
-    talk = ["hold talk"] if can_talk(screen) else []
-    second = "  ·  ".join(parts[2:] + talk + [f"4 {global_label}"])
-    return [first, second]
+    if armed and SELECT in table:
+        return [("release", f"to {table[SELECT][1]}")]
+    talk = can_talk(screen)
+    order = [SELECT, NEXT, EXTRA, BACK, PREVIOUS] if talk else [NEXT, SELECT, BACK, EXTRA, PREVIOUS]
+    shown, labels = [], set()
+    for action in order:
+        if action == SELECT and talk:
+            shown.append(("hold", "talk"))
+            continue
+        if action not in table:
+            continue
+        label = table[action][1]
+        if talk and action == NEXT and label == "next":
+            continue                     # plain list stepping, as everywhere
+        if label in labels and action != BACK:
+            continue
+        labels.add(label)
+        shown.append((_GESTURE[action], label))
+    back = [hint for hint in shown if hint[0] == "4×"]
+    if back and shown.index(back[0]) > 2:
+        shown.remove(back[0])
+        shown.insert(2, back[0])
+    return shown

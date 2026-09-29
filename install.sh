@@ -63,10 +63,11 @@ body = {
         "icon": "WT",
         "launch_command": f"{root}/run.sh",
         "cwd": root,
-        # The app owns every gesture: single clicks step through
-        # contacts, so the daemon's 4-clicks-in-3-seconds exit would
-        # fire during ordinary browsing.
+        # The app owns every gesture and the Esc key (MFruit OS controls:
+        # 4 clicks and Esc go back a screen, and leave only from Home),
+        # so the daemon must not exit it on either.
         "exit_gesture": "none",
+        "disable_esc_exit_key": True,
         "priority": 45,
         "persist": True,
         "use_daemon_default_log": True,

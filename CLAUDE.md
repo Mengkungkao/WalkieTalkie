@@ -1,3 +1,27 @@
+# WalkieTalkie — an MFruit OS app
+
+Push-to-talk voice and text over LoRa (SX126X) on a Whisplay HAT, for
+Raspberry Pi Zero 2 W and Orange Pi Zero 2W. Python 3.9+.
+
+- **Follow `.claude/rules/mfruit-os-app.md`** (MFruit OS app rules: one
+  input controller, the same controls and look as MFruit OS, lifecycle).
+- Input: `mfruit_sdk.input.InputController` → `WalkieApp._on_action`
+  (`app/main.py`). What each action does on each screen, the keyboard
+  letters and the footer hints all come from `app/ui/navigation.py` —
+  change the table, never special-case a screen in the handler.
+  Talk screens (`TALK_SCREENS`): hold / Space talks, 3× opens.
+- Editors (`app/ui/editors.py`) take actions, not gestures; Enter from a
+  keyboard saves at once, typed digits fill a number.
+- Screens (`app/ui/screens.py`) draw MFruit OS's status bar (with the LoRa
+  signal in a reserved slot) and footer; content stays between
+  `CONTENT_TOP` and `CONTENT_BOTTOM`; page names must fit (tested).
+- `mfruit_sdk/` is vendored from MFruit OS — never edit it here; change
+  `~/MFruitOS/mfruitos/sdk` and run `~/MFruitOS/scripts/sdk-sync.sh .`.
+- Tests: `python3 -m pytest -q` (no hardware). Previews: `python3 tools/preview.py`.
+- Keep the README's "Using it" section in step with `navigation.py`.
+
+---
+
 # Skill: Write Tests, Debug, and Update Documentation
 
 ## Purpose

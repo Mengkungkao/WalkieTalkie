@@ -46,7 +46,7 @@ def centred(draw, y: int, text: str, font, fill, width: int = theme.SCREEN_WIDTH
               font=font, fill=fill)
 
 
-def panel(draw, box, fill=theme.SURFACE, outline=None, radius: int = 8):
+def panel(draw, box, fill=theme.SURFACE, outline=None, radius: int = 10):
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline)
 
 
@@ -96,10 +96,3 @@ def vu_meter(draw, box, level: float, segments: int = 18):
         else:
             colour = theme.SURFACE_HI
         draw.rectangle([left, y0, left + seg_width, y1], fill=colour)
-
-
-def hint(draw, y: int, lines: list):
-    """Bottom-of-screen gesture legend."""
-    small = theme.font(12)
-    for index, line in enumerate(lines):
-        centred(draw, y + index * 15, line, small, theme.TEXT_FAINT)

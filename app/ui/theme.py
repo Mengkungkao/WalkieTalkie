@@ -1,4 +1,4 @@
-"""Palette, fonts and metrics for the 240x280 panel.
+"""Palette, fonts and metrics for the 240x280 panel (MFruit OS's look).
 
 Colours are picked for a small, often outdoor-viewed LCD: strongly
 separated hues at high value, no mid-grey text, and one unmistakable
@@ -10,6 +10,8 @@ fill colour and size, never by a thin outline.
 
 from __future__ import annotations
 
+from mfruit_sdk.ui import fonts as _fonts
+from mfruit_sdk.ui import theme as _mfruit
 from PIL import ImageFont
 
 SCREEN_WIDTH = 240
@@ -35,19 +37,25 @@ def corner_inset(y: int) -> int:
     offset = CORNER_RADIUS - depth
     return int(round(CORNER_RADIUS - (CORNER_RADIUS ** 2 - offset ** 2) ** 0.5))
 
-BG = (10, 12, 16)
-SURFACE = (22, 26, 34)
-SURFACE_HI = (36, 42, 54)
+# MFruit OS's palette (mfruit_sdk), so the app looks like the rest of the
+# device. The state colours keep their meaning: red is transmitting, green
+# receiving, amber waiting on the duty cycle, violet voice.
+MFRUIT = _mfruit.DARK
+
+BG = MFRUIT.bg
+SURFACE = MFRUIT.surface
+SURFACE_HI = MFRUIT.surface_hi
+SELECTED = MFRUIT.accent_dim    # a selected row, as in MFruit OS's lists
 BORDER = (58, 66, 82)
 
-TEXT = (236, 240, 246)
-TEXT_DIM = (140, 150, 166)
-TEXT_FAINT = (92, 100, 116)
+TEXT = MFRUIT.text
+TEXT_DIM = MFRUIT.text_muted
+TEXT_FAINT = MFRUIT.text_faint
 
-ACCENT = (86, 168, 255)     # selection, links
-OK = (64, 208, 138)         # receiving, online
-WARN = (245, 178, 62)       # duty cycle pressure, incomplete
-DANGER = (255, 92, 92)      # transmitting, errors
+ACCENT = MFRUIT.accent      # selection, links
+OK = MFRUIT.success         # receiving, online
+WARN = MFRUIT.warning       # duty cycle pressure, incomplete
+DANGER = MFRUIT.error       # transmitting, errors
 VOICE = (188, 132, 255)     # voice messages
 
 LED_IDLE = (0, 6, 10)
@@ -55,30 +63,22 @@ LED_TX = (60, 0, 0)
 LED_RX = (0, 40, 16)
 LED_REC = (60, 20, 0)
 
-_FONT_PATHS = {
-    "regular": (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ),
-    "bold": (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ),
-    "mono": (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    ),
-}
+_MONO_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+)
 
 _cache = {}
 
 
 def font(size: int, weight: str = "regular"):
-    """Cached font lookup; falls back to PIL's bitmap font if none exist."""
+    """MFruit OS's font (Inter, or DejaVu without MFruit OS); "mono" is DejaVu Mono."""
+    if weight != "mono":
+        return _fonts.font(size, "bold" if weight == "bold" else weight)
     key = (size, weight)
     if key in _cache:
         return _cache[key]
-    for path in _FONT_PATHS.get(weight, ()):
+    for path in _MONO_PATHS:
         try:
             _cache[key] = ImageFont.truetype(path, size)
             return _cache[key]

@@ -1,7 +1,7 @@
 """The Settings flow, end to end, without a Pi.
 
-Drives the real handlers a button press reaches -- `_open_settings`,
-`_open_setting`, `_editor_gesture` -- so the wiring between the gesture
+Drives the real handlers a button press or key reaches -- `_open_settings`,
+`_open_setting`, `_editor_action` -- so the wiring between the action
 table, the editors and the persisted overrides is exercised as a whole
 rather than a piece at a time.
 """
@@ -21,7 +21,17 @@ from app.ui import navigation as nav
 from app.ui.screens import EDIT, SETTINGS, ViewState
 from app.utils import clock
 
-SINGLE, DOUBLE, TRIPLE = "single", "double", "triple"
+from mfruit_sdk.input import BACK, EXTRA, NEXT, PREVIOUS, SELECT, Action
+
+# MFruit OS input actions, named after the button gesture that makes them:
+# tap, 2 clicks, hold (then release), 3 clicks, 4 clicks.
+TAP, TWICE, HOLD, THRICE, QUAD = NEXT, PREVIOUS, SELECT, EXTRA, BACK
+
+
+def act(app, *names, source="button"):
+    """Press through the app's real input handler, as the controller does."""
+    for name in names:
+        app._on_action(Action(name, source))
 
 
 class FakePlayer:
@@ -46,7 +56,7 @@ class FakeInbox:
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     """A WalkieApp with only what the settings handlers touch."""
     instance = WalkieApp.__new__(WalkieApp)
     settings = Settings()
@@ -54,7 +64,9 @@ def app(tmp_path):
     settings.identity.callsign = "Rover"
     settings.contacts = [Contact("Base", 1)]
     monkey_dir = tmp_path
-    type(settings).data_dir = property(lambda _self: monkey_dir)
+    # Undone after each test: patching the class for good leaked this
+    # directory into every later test that builds a Settings.
+    monkeypatch.setattr(type(settings), "data_dir", property(lambda _self: monkey_dir))
 
     instance.settings = settings
     instance.overrides = Overrides(tmp_path)
@@ -78,9 +90,9 @@ def open_setting(app, key):
     app._open_setting()
 
 
-def play(app, *gestures):
-    for gesture in gestures:
-        app._editor_gesture(gesture)
+def play(app, *names):
+    for name in names:
+        app._editor_action(Action(name))
 
 
 # --- structure ---------------------------------------------------------
@@ -102,7 +114,7 @@ def test_every_settings_row_opens_without_error(app):
         app.state.settings_index = index
         app._open_setting()
         assert app.state.screen == EDIT
-        app._editor_gesture(TRIPLE)          # cancel back out
+        play(app, QUAD)                      # cancel back out
         assert app.state.screen == SETTINGS
 
 
@@ -111,7 +123,7 @@ def test_setting_the_device_id_persists(app, tmp_path):
     open_setting(app, "device_id")
     app.state.editor.cells = [0, 0, 0, 0, 9]
     app.state.editor.cursor = 4
-    play(app, DOUBLE)                        # commit from the last digit
+    play(app, HOLD)                        # commit from the last digit
 
     assert app.settings.radio.address == 9
     assert Overrides(tmp_path).get("radio", "address") == 9
@@ -120,7 +132,7 @@ def test_setting_the_device_id_persists(app, tmp_path):
 def test_cancelling_an_edit_changes_nothing(app, tmp_path):
     open_setting(app, "device_id")
     app.state.editor.cells = [0, 0, 0, 0, 9]
-    play(app, TRIPLE)
+    play(app, QUAD)
     assert app.settings.radio.address == 5
     assert Overrides(tmp_path).get("radio", "address") is None
 
@@ -130,7 +142,7 @@ def test_device_id_cannot_collide_with_a_contact(app):
     open_setting(app, "device_id")
     app.state.editor.cells = [0, 0, 0, 0, 1]   # Base is address 1
     app.state.editor.cursor = 4
-    play(app, DOUBLE)
+    play(app, HOLD)
     assert app.settings.radio.address == 5
     assert "contact" in app.state.active_banner.lower()
 
@@ -139,7 +151,7 @@ def test_device_id_cannot_collide_with_a_contact(app):
 def test_the_name_is_picked_from_a_list_and_persists(app, tmp_path):
     open_setting(app, "name")
     assert app.state.editor.text == "Rover"      # starts on the current name
-    play(app, SINGLE, DOUBLE)                    # the next name, then save
+    play(app, TAP, HOLD)                    # the next name, then save
     chosen = app.settings.identity.callsign
     assert chosen != "Rover"
     assert Overrides(tmp_path).get("identity", "callsign") == chosen
@@ -149,7 +161,7 @@ def test_the_name_is_picked_from_a_list_and_persists(app, tmp_path):
 def test_the_privacy_channel_persists(app, tmp_path):
     open_setting(app, "channel")
     assert app.state.editor.text == "channel 1"
-    play(app, SINGLE, SINGLE, DOUBLE)            # 1 -> 3, save
+    play(app, TAP, TAP, HOLD)            # 1 -> 3, save
     assert app.settings.radio.privacy_channel == 3
     assert app.state.channel == 3
     assert Overrides(tmp_path).get("radio", "privacy_channel") == 3
@@ -163,9 +175,9 @@ def test_base_station_starts_on_the_current_value(app):
 
 def test_choosing_a_base_station_persists(app, tmp_path):
     open_setting(app, "base")
-    play(app, SINGLE)                        # step off "(none)" onto a station
+    play(app, TAP)                        # step off "(none)" onto a station
     chosen = app.state.editor.value
-    play(app, DOUBLE)
+    play(app, HOLD)
     assert chosen is not None
     assert Overrides(tmp_path).base_address == chosen
 
@@ -176,7 +188,7 @@ def test_setting_the_clock_falls_back_to_an_offset(app, monkeypatch, tmp_path):
     monkeypatch.setattr(clock, "_try_system_clock", lambda _when: False)
     open_setting(app, "clock")
     app.state.editor.values[0] += 1          # next year
-    play(app, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE)
+    play(app, HOLD, HOLD, HOLD, HOLD, HOLD)
 
     assert clock.offset() > 0
     assert Overrides(tmp_path).clock_offset > 0
@@ -187,7 +199,7 @@ def test_setting_the_clock_for_real_clears_any_offset(app, monkeypatch, tmp_path
     monkeypatch.setattr(clock, "_try_system_clock", lambda _when: True)
     clock.set_offset(500.0)
     open_setting(app, "clock")
-    play(app, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE)
+    play(app, HOLD, HOLD, HOLD, HOLD, HOLD)
     assert clock.offset() == 0.0
 
 
@@ -195,7 +207,7 @@ def test_setting_the_clock_for_real_clears_any_offset(app, monkeypatch, tmp_path
 def test_reset_defaults_to_no_and_keeps_everything(app, tmp_path):
     app.overrides.set("radio", "address", 9)
     open_setting(app, "reset")
-    play(app, DOUBLE)                        # confirm while still on "no"
+    play(app, HOLD)                        # confirm while still on "no"
     assert Overrides(tmp_path).get("radio", "address") == 9
 
 
@@ -204,7 +216,7 @@ def test_reset_erases_everything_once_confirmed(app, tmp_path):
     app.overrides.add_contact("Hilltop", 77)
     app.roster.note_peer(77, "Hilltop", -90)
     open_setting(app, "reset")
-    play(app, SINGLE, DOUBLE)                # onto YES, then confirm
+    play(app, TAP, HOLD)                # onto YES, then confirm
 
     assert Overrides(tmp_path).data == {}
     assert app.inbox.items == []
@@ -223,9 +235,9 @@ def test_hold_to_talk_is_suspended_while_editing(app):
 
 
 def test_the_editor_screen_is_not_in_the_navigation_table(app):
-    """Editors route their own gestures; the table must not steal them."""
-    for gesture in (SINGLE, DOUBLE, TRIPLE):
-        assert nav.route(EDIT, gesture) is None
+    """Editors route their own input; the table must not steal it."""
+    for name in (TAP, TWICE, HOLD, THRICE, QUAD):
+        assert nav.route(EDIT, name) is None
 
 
 # --- voice quality -------------------------------------------------------
@@ -243,7 +255,7 @@ def test_choosing_a_voice_quality_switches_the_codec_and_persists(app, tmp_path)
     app.codec = None
     app.settings.audio.codec_mode = "3200"
     open_setting(app, "voice")
-    play(app, SINGLE, DOUBLE)                    # Clear -> Balanced, save
+    play(app, TAP, HOLD)                    # Clear -> Balanced, save
     assert app.settings.audio.codec_mode == "1600"
     assert app.codec_mode == MODE_BY_NAME["1600"]
     assert app.codec.mode == MODE_BY_NAME["1600"]
