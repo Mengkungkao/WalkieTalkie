@@ -1444,3 +1444,9 @@ voice path reports itself unavailable and the app runs on.
 Radio register layout derived from Waveshare's SX126X HAT sample code.
 Speech coding by [Codec2](https://www.rowetel.com/codec2.html) (David
 Rowe, LGPL). Display and button access through the Whisplay daemon.
+
+## MFruit OS 1.4.0 keyboard compatibility
+
+Vendored SDK 1.2.0 reads keys from MFruit OS's foreground key hub while the
+launcher holds keyboards exclusively. Standalone use falls back to evdev.
+Deploy this SDK with MFruit OS 1.4.0 so keyboard input continues to work.
