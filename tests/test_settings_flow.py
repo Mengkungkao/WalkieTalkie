@@ -99,7 +99,7 @@ def play(app, *names):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["name", "device_id", "channel", "voice", "base", "clock", "reset"]
+    assert keys == ["name", "device_id", "channel", "voice", "base", "clock", "reset", "back"]
     assert app.state.screen == SETTINGS
 
 
@@ -111,11 +111,24 @@ def test_opening_a_setting_enters_an_editor(app):
 def test_every_settings_row_opens_without_error(app):
     app._open_settings()
     for index, item in enumerate(app.state.settings_items):
+        if item["key"] == "back":
+            continue
         app.state.settings_index = index
         app._open_setting()
         assert app.state.screen == EDIT
         play(app, QUAD)                      # cancel back out
         assert app.state.screen == SETTINGS
+
+
+def test_settings_back_is_a_selection_and_tapping_wraps(app):
+    app._open_settings()
+    app._next_setting(-1)
+    assert app.state.back_selected and app.state.screen == SETTINGS
+    app._next_setting()
+    assert app.state.settings_index == 0 and app.state.screen == SETTINGS
+    app._next_setting(-1)
+    act(app, HOLD)
+    assert app.state.screen == "home"
 
 
 # --- device id ---------------------------------------------------------

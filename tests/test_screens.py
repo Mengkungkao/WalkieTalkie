@@ -250,6 +250,77 @@ def test_content_never_reaches_the_footer(display, screen):
         f"{scr.CONTENT_BOTTOM}")
 
 
+@pytest.mark.parametrize("screen", [CONTACTS, INBOX, PAIR, STATUS])
+@pytest.mark.parametrize("empty", [False, True], ids=["populated", "empty"])
+def test_selected_back_stays_visible_during_a_notification(display, screen, empty):
+    """Incoming-message toasts must not cover the way out of a list."""
+    state = (ViewState(screen=screen) if empty else
+             populated_state(screen=screen, pair_found=PAIR_FOUND))
+    state.contacts_back = state.inbox_back = state.pair_back = True
+    before, draw = display.new_canvas()
+    screens.RENDERERS[screen](draw, state)
+    back_box = (0, screens.BACK_TOP, theme.SCREEN_WIDTH, screens.CONTENT_BOTTOM + 1)
+    back = before.crop(back_box)
+    colours = {colour for _count, colour in back.getcolors(back.width * back.height)}
+    assert theme.SELECTED in colours, "Back has no visible selection"
+    assert theme.TEXT in colours, "Back has no readable label"
+
+    state.flash("New message from Base", seconds=60)
+    after, draw = display.new_canvas()
+    screens.RENDERERS[screen](draw, state)
+    assert before.tobytes() != after.tobytes(), "notification was not rendered"
+    assert after.crop(back_box).tobytes() == back.tobytes(), "notification covers Back"
+    footer_box = (0, screens.FOOTER_Y - 5, theme.SCREEN_WIDTH, theme.SCREEN_HEIGHT)
+    assert after.crop(footer_box).tobytes() == before.crop(footer_box).tobytes()
+
+
+@pytest.mark.parametrize("screen", [CONTACTS, INBOX, PAIR])
+def test_last_list_row_leaves_space_for_pinned_back(display, screen):
+    """Long lists and their counters must stop before the Back control."""
+    state = populated_state(screen=screen, pair_found=PAIR_FOUND)
+    state.selected_index = len(state.entries) - 1
+    state.inbox_index = len(state.inbox) - 1
+    state.pair_index = len(state.pair_found) - 1
+    image, draw = display.new_canvas()
+    screens.RENDERERS[screen](draw, state)
+    gap = image.crop((6, screens.LIST_BOTTOM + 1,
+                      theme.SCREEN_WIDTH - 6, screens.BACK_TOP))
+    assert gap.getcolors(gap.width * gap.height) == [(gap.width * gap.height, theme.BG)], \
+        "list content extends into the space above Back"
+    back = image.crop((0, screens.BACK_TOP, theme.SCREEN_WIDTH,
+                       screens.CONTENT_BOTTOM + 1))
+    colours = {colour for _count, colour in back.getcolors(back.width * back.height)}
+    assert theme.TEXT_DIM in colours, "unselected Back label is missing"
+    assert theme.SELECTED not in colours, "Back looks selected while a list row is selected"
+
+
+@pytest.mark.parametrize("battery_present", [False, True], ids=["external", "battery"])
+def test_status_keeps_all_details_and_power_above_back(display, monkeypatch, battery_present):
+    """Adding Back must not silently clip the final hardware/power rows."""
+    state = populated_state(screen=STATUS, battery_present=battery_present,
+                            battery_summary="94%  ~2.3h left",
+                            radio_note="transparent mode", audio_note="whisplaysound")
+    image, draw = display.new_canvas()
+    labels = {"name", "id", "freq", "peer", "rssi", "duty", "pkts",
+              "mode", "audio", "power"}
+    power = state.battery_summary if battery_present else "external power"
+    drawn = {}
+    original_text = draw.text
+
+    def record_text(xy, text, *args, **kwargs):
+        if text in labels or text == power:
+            drawn[text] = draw.textbbox(xy, text, font=kwargs.get("font"))
+        return original_text(xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(draw, "text", record_text)
+    screens.RENDERERS[STATUS](draw, state)
+    assert set(drawn) == labels | {power}, "Status omitted a detail to make room for Back"
+    for text, (left, top, right, bottom) in drawn.items():
+        assert screens.CONTENT_TOP <= top < bottom <= screens.LIST_BOTTOM, \
+            f"{text!r} crosses the status content boundary: {top}-{bottom}"
+        assert 0 <= left < right <= theme.SCREEN_WIDTH
+
+
 def test_the_broadcast_entry_is_short_enough_for_its_row():
     """"ALL STATIONS" crowded out the address and last-heard line."""
     from PIL import Image, ImageDraw

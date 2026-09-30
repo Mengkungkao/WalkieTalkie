@@ -36,11 +36,14 @@ def sample(**overrides) -> ViewState:
             {"key": "receive", "label": "Receive", "value": "2 new  ·  14 in all"},
             {"key": "pair", "label": "Pair devices", "value": "3 paired  ·  Base in range"},
             {"key": "settings", "label": "Settings", "value": "name, ID, privacy channel"},
+            {"key": "status", "label": "Status", "value": "radio, signal, audio and power"},
             {"key": "range", "label": "Range test", "value": "probe a paired radio"},
+            {"key": "back", "label": "Back to MFruit OS"},
         ],
         start_items=[
             {"key": "all", "label": "To ALL", "value": "every paired radio on channel 3"},
             {"key": "device", "label": "To a paired device", "value": "3 paired"},
+            {"key": "back", "label": "Back"},
         ],
         settings_items=[
             {"key": "name", "label": "Name", "value": "Rover  ·  what other radios see"},
@@ -48,11 +51,12 @@ def sample(**overrides) -> ViewState:
             {"key": "channel", "label": "Privacy channel", "value": "3  ·  others are ignored"},
             {"key": "reset", "label": "Reset all data", "value": "3 message(s), keys",
              "destructive": True},
+            {"key": "back", "label": "Back"},
         ],
         entries=[
-            Entry("ALL STATIONS", 0xFFFF, True),
             Entry("Base", 1, True, last_heard=1.0, last_rssi=-72),
             Entry("Hilltop", 9, False, last_heard=1.0, last_rssi=-104),
+            Entry("Ridge", 12, True, last_heard=1.0, last_rssi=-92),
         ],
         inbox=[
             Item("a", "voice", 1, "Base", 1.0, -80, duration=4.2),
@@ -95,6 +99,16 @@ SHOTS = [
                         editor_title="RESET")),
     ("14-pair", dict(screen=PAIR)),
     ("15-range", dict(screen=RANGE)),
+    ("16-home-status", dict(screen=HOME, home_index=4)),
+    ("17-home-back", dict(screen=HOME, home_index=6)),
+    ("18-start-back", dict(screen=START, start_index=2)),
+    ("19-contacts-back", dict(screen=CONTACTS, contacts_back=True)),
+    ("20-inbox-back", dict(screen=INBOX, inbox_back=True)),
+    ("21-pair-back", dict(screen=PAIR, pair_back=True)),
+    ("22-contacts-empty", dict(screen=CONTACTS, entries=[], contacts_back=True)),
+    ("23-inbox-empty", dict(screen=INBOX, inbox=[], inbox_back=True, unread=0)),
+    ("24-pair-empty", dict(screen=PAIR, pair_found=[], pair_back=True)),
+    ("25-settings-back", dict(screen=SETTINGS, settings_index=4)),
 ]
 
 

@@ -53,8 +53,16 @@ def test_four_clicks_on_home_leaves_the_app():
     assert nav.route(HOME, BACK) == nav.EXIT_APP
 
 
-def test_home_has_nowhere_back_so_three_clicks_shows_status():
-    assert nav.route(HOME, EXTRA) == nav.OPEN_STATUS
+def test_three_clicks_on_home_do_not_open_status():
+    """An incomplete four-click exit must not enter an unrelated screen."""
+    assert nav.route(HOME, EXTRA) is None
+
+
+def test_status_has_one_back_selection_and_taps_stay_on_the_page():
+    assert nav.route(STATUS, NEXT) == nav.NEXT_ITEM
+    assert nav.route(STATUS, PREVIOUS) == nav.PREVIOUS_ITEM
+    assert nav.route(STATUS, SELECT) == nav.GO_BACK
+    assert nav.route(STATUS, EXTRA) is None
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -80,9 +88,12 @@ def test_tap_and_hold_and_back_do_something_everywhere(screen):
 
 
 def test_empty_inbox_is_not_a_dead_end():
-    """The regression: every action must leave a screen with no content."""
-    for action in ACTIONS:
-        assert nav.route(INBOX, action, inbox_empty=True) == nav.GO_BACK
+    """The sole Back row leaves deliberately; moving does not leave."""
+    assert nav.route(INBOX, NEXT, inbox_empty=True) == nav.NEXT_MESSAGE
+    assert nav.route(INBOX, PREVIOUS, inbox_empty=True) == nav.PREVIOUS_MESSAGE
+    assert nav.route(INBOX, SELECT, inbox_empty=True) == nav.GO_BACK
+    assert nav.route(INBOX, BACK, inbox_empty=True) == nav.GO_BACK
+    assert nav.route(INBOX, EXTRA, inbox_empty=True) is None
 
 
 @pytest.mark.parametrize("screen", ALL_SCREENS)
@@ -118,6 +129,35 @@ def test_armed_hold_says_what_release_does():
     assert nav.hints(SETTINGS, armed=True) == [("release", "to open")]
 
 
+@pytest.mark.parametrize("screen", ALL_SCREENS)
+def test_selected_back_uses_hold_without_talking_or_extra_actions(screen):
+    expected = nav.EXIT_APP if screen == HOME else nav.GO_BACK
+    assert nav.route(screen, SELECT, back_selected=True) == expected
+    assert nav.route(screen, EXTRA, back_selected=True) is None
+    assert nav.route(screen, BACK, back_selected=True) == expected
+    assert not nav.can_talk(screen, back_selected=True)
+
+
+@pytest.mark.parametrize("screen", LISTS)
+def test_selected_back_keeps_list_navigation(screen):
+    assert nav.route(screen, NEXT, back_selected=True) == nav.route(screen, NEXT)
+    assert nav.route(screen, PREVIOUS, back_selected=True) == nav.route(screen, PREVIOUS)
+
+
+@pytest.mark.parametrize("screen", ALL_SCREENS)
+def test_selected_back_footer_describes_hold_and_release(screen):
+    label = "exit" if screen == HOME else "back"
+    hints = nav.hints(screen, back_selected=True)
+    assert ("hold", label) in hints[:3]
+    assert ("hold", "talk") not in hints
+    assert all(gesture != "3×" for gesture, _label in hints)
+    assert nav.hints(screen, armed=True, back_selected=True) == [("release", f"to {label}")]
+
+
+def test_empty_inbox_armed_hold_says_back():
+    assert nav.hints(INBOX, inbox_empty=True, armed=True) == [("release", "to back")]
+
+
 def test_only_start_the_paired_list_talk_and_range_talk_on_a_hold():
     assert {s for s in ALL_SCREENS if nav.can_talk(s)} == {START, CONTACTS, TALK, RANGE}
 
@@ -132,12 +172,10 @@ def test_keyboard_letters_reach_the_three_click_actions():
 def test_every_screen_is_reachable_from_home():
     """Menus open their rows' screens; the app decides which. Model that."""
     opens = {
-        (HOME, nav.OPEN_ITEM): (START, INBOX, PAIR, SETTINGS, RANGE),
+        (HOME, nav.OPEN_ITEM): (START, INBOX, PAIR, SETTINGS, RANGE, STATUS),
         (START, nav.OPEN_ITEM): (TALK, CONTACTS),
         (CONTACTS, nav.OPEN_TALK): (TALK,),
         (TALK, nav.OPEN_INBOX): (INBOX,),
-        (HOME, nav.OPEN_STATUS): (STATUS,),
-        (STATUS, nav.OPEN_SETTINGS): (SETTINGS,),
     }
     reachable, frontier = {HOME}, [HOME]
     while frontier:

@@ -19,7 +19,8 @@ app, so nothing is relearned between apps:
 Menus and lists follow it exactly: tap next, 2 clicks previous, hold
 opens, 4 clicks back. **Talk screens** (`TALK_SCREENS`) are where holding
 the button -- or Space -- talks, so there three clicks opens the selected
-row instead. Back from Home leaves the app.
+row instead. A selected Back row always uses hold and release, even on
+a talk screen. Back from Home leaves the app.
 """
 
 from __future__ import annotations
@@ -75,7 +76,6 @@ SCREEN_ACTIONS = {
         NEXT: (NEXT_ITEM, "next"),
         PREVIOUS: (PREVIOUS_ITEM, "previous"),
         SELECT: (OPEN_ITEM, "open"),
-        EXTRA: (OPEN_STATUS, "status"),
         BACK: (EXIT_APP, "exit"),
     },
     START: {
@@ -106,9 +106,9 @@ SCREEN_ACTIONS = {
         BACK: (GO_BACK, "back"),
     },
     STATUS: {
-        NEXT: (GO_BACK, "back"),
-        SELECT: (OPEN_SETTINGS, "settings"),
-        EXTRA: (OPEN_SETTINGS, "settings"),
+        NEXT: (NEXT_ITEM, "next"),
+        PREVIOUS: (PREVIOUS_ITEM, "previous"),
+        SELECT: (GO_BACK, "back"),
         BACK: (GO_BACK, "back"),
     },
     SETTINGS: {
@@ -134,17 +134,7 @@ SCREEN_ACTIONS = {
     },
 }
 
-# An empty inbox has nothing to step through and nothing to play, so
-# every action leaves rather than silently doing nothing.
-EMPTY_INBOX_ACTIONS = {
-    NEXT: (GO_BACK, "back"),
-    PREVIOUS: (GO_BACK, "back"),
-    SELECT: (GO_BACK, "back"),
-    EXTRA: (GO_BACK, "back"),
-    BACK: (GO_BACK, "back"),
-}
-
-# Keyboard letters for the actions that are three clicks on the button.
+# Keyboard shortcuts, including Status without a multi-click gesture.
 CHAR_ACTIONS = {
     HOME: {"s": OPEN_STATUS},
     TALK: {"r": REPLAY_LAST},
@@ -161,11 +151,12 @@ CHAR_ACTIONS = {
 TALK_SCREENS = frozenset({START, CONTACTS, TALK, RANGE})
 
 
-def can_talk(screen: str) -> bool:
-    return screen in TALK_SCREENS
+def can_talk(screen: str, back_selected: bool = False) -> bool:
+    return screen in TALK_SCREENS and not back_selected
 
 
-def actions(screen: str, inbox_empty: bool = False) -> dict:
+def actions(screen: str, inbox_empty: bool = False,
+            back_selected: bool = False) -> dict:
     """The action -> (what it does, label) map in force for this screen.
 
     EDIT is absent on purpose: a modal editor routes input to itself
@@ -173,14 +164,20 @@ def actions(screen: str, inbox_empty: bool = False) -> dict:
     """
     if screen == EDIT:
         return {}
-    if screen == INBOX and inbox_empty:
-        return dict(EMPTY_INBOX_ACTIONS)
-    return dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[HOME]))
+    table = dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[HOME]))
+    if back_selected or (screen == INBOX and inbox_empty):
+        # Back is an ordinary selectable row. Taps only move through the
+        # list, including an empty inbox whose sole row is Back. A partial
+        # four-click exit must never select this row or start playback.
+        table[SELECT] = (EXIT_APP, "exit") if screen == HOME else (GO_BACK, "back")
+        table.pop(EXTRA, None)
+    return table
 
 
-def route(screen: str, action: str, inbox_empty: bool = False):
+def route(screen: str, action: str, inbox_empty: bool = False,
+          back_selected: bool = False):
     """What an input action does here, or None if it does nothing."""
-    entry = actions(screen, inbox_empty).get(action)
+    entry = actions(screen, inbox_empty, back_selected).get(action)
     return entry[0] if entry else None
 
 
@@ -192,17 +189,18 @@ def route_char(screen: str, char: str):
 _GESTURE = {NEXT: "tap", PREVIOUS: "2×", SELECT: "hold", EXTRA: "3×", BACK: "4×"}
 
 
-def hints(screen: str, inbox_empty: bool = False, armed: bool = False) -> list:
+def hints(screen: str, inbox_empty: bool = False, armed: bool = False,
+          back_selected: bool = False) -> list:
     """Footer hints, [(gesture, label)], from the same table as `route`.
 
     Most important first, because the footer drops what does not fit
     from the end: on a talk screen "hold talk" leads; the way back is
     always within the first three.
     """
-    table = actions(screen, inbox_empty)
+    table = actions(screen, inbox_empty, back_selected)
     if armed and SELECT in table:
         return [("release", f"to {table[SELECT][1]}")]
-    talk = can_talk(screen)
+    talk = can_talk(screen, back_selected)
     order = [SELECT, NEXT, EXTRA, BACK, PREVIOUS] if talk else [NEXT, SELECT, BACK, EXTRA, PREVIOUS]
     shown, labels = [], set()
     for action in order:
