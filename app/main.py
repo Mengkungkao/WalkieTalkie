@@ -178,6 +178,7 @@ class WalkieApp:
             click_window_ms=settings.input.click_window_ms,
             talk_press_ms=settings.input.hold_ms,
             long_press_ms=settings.input.long_press_ms,
+            app_id=board_module.APP_ID,    # MFruit OS hands its keys to this app by id
         )
         self.input.attach(self.board)
         # WiFi level for the MFruit OS status bar (battery comes from app.utils.battery).
