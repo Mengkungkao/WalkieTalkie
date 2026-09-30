@@ -195,7 +195,6 @@ def run_ramp(link, args):
         good = 0
         rtts = []
         rssis = []
-        last_note = ""
         for _ in range(attempts):
             replies.clear()
             got.clear()
@@ -205,14 +204,8 @@ def run_ramp(link, args):
                 rtts.append(time.monotonic() - started)
                 if replies.get("body") == payload:
                     good += 1
-                    last_note = "ok"
-                else:
-                    last_note = (f"CORRUPT ({len(replies.get('body', b''))}"
-                                 f"/{len(payload)} B back)")
                 if replies.get("rssi") is not None:
                     rssis.append(replies["rssi"])
-            else:
-                last_note = "no reply"
             if attempts > 1:
                 time.sleep(0.3)
 

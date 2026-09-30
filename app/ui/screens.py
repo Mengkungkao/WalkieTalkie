@@ -54,6 +54,8 @@ HEADER_HEIGHT = mfruit_layout.CONTENT_TOP - 6
 CONTENT_TOP = mfruit_layout.CONTENT_TOP
 CONTENT_BOTTOM = mfruit_layout.CONTENT_BOTTOM
 CONTENT_HEIGHT = CONTENT_BOTTOM - CONTENT_TOP
+BACK_TOP = CONTENT_BOTTOM - 32
+LIST_BOTTOM = BACK_TOP - 6
 
 # Room in the status bar for the LoRa signal meter, left of WiFi/battery.
 SIGNAL_SLOT = 20
@@ -109,6 +111,7 @@ class ViewState:
     # Paired devices, and which of them have no keys (legacy contacts).
     entries: list = field(default_factory=list)
     selected_index: int = 0
+    contacts_back: bool = False
     unpaired: set = field(default_factory=set)
 
     # Who holding the button talks to.
@@ -130,6 +133,7 @@ class ViewState:
 
     inbox: list = field(default_factory=list)
     inbox_index: int = 0
+    inbox_back: bool = False
     unread: int = 0
 
     settings_items: list = field(default_factory=list)
@@ -141,6 +145,7 @@ class ViewState:
     # Radios heard pairing: (address, name, rssi, already a contact).
     pair_found: list = field(default_factory=list)
     pair_index: int = 0
+    pair_back: bool = False
     pair_status: str = ""
     pair_channels: dict = field(default_factory=dict)
 
@@ -179,6 +184,22 @@ class ViewState:
         return self.entries[self.selected_index] if self.entries else None
 
     @property
+    def back_selected(self) -> bool:
+        menus = {HOME: (self.home_items, self.home_index),
+                 START: (self.start_items, self.start_index),
+                 SETTINGS: (self.settings_items, self.settings_index)}
+        if self.screen in menus:
+            items, index = menus[self.screen]
+            return bool(items and items[index % len(items)]["key"] == "back")
+        if self.screen == CONTACTS:
+            return self.contacts_back or not self.entries
+        if self.screen == INBOX:
+            return self.inbox_back or not self.inbox
+        if self.screen == PAIR:
+            return self.pair_back or not self.pair_found
+        return self.screen == STATUS
+
+    @property
     def busy(self) -> bool:
         return self.radio_state in (RECORDING, SENDING, PLAYING)
 
@@ -206,8 +227,8 @@ RANGE_DOT = {
 }
 RANGE_COLOUR = {state: colour for state, (colour, _filled) in RANGE_DOT.items()}
 STATE_LABEL = {
-    IDLE: "READY", RECORDING: "RECORDING", SENDING: "SENDING",
-    RECEIVING: "RECEIVING", PLAYING: "PLAYING",
+    IDLE: "Ready", RECORDING: "Recording", SENDING: "Sending",
+    RECEIVING: "Receiving", PLAYING: "Playing",
 }
 
 
@@ -234,20 +255,35 @@ def draw_footer(draw, state: ViewState, hints: list):
     """Gesture hints, from the same table the app dispatches on; a banner
     (a flash message) shows above them."""
     canvas = Canvas.over(draw, theme.MFRUIT)
-    if state.armed:
+    if state.armed or state.back_selected:
         from app.ui import navigation
 
         hints = navigation.hints(state.screen, inbox_empty=not state.inbox,
-                                 armed=True) or hints
+                                 armed=state.armed,
+                                 back_selected=state.back_selected) or hints
     footer(canvas, hints)
     banner = state.active_banner
     if banner:
-        toast(canvas, banner)
+        toast(canvas, banner, y=BACK_TOP - 34 if state.screen in
+              (CONTACTS, INBOX, PAIR, STATUS) else FOOTER_Y - 40)
 
 
 # --- contacts ----------------------------------------------------------
+def draw_back(draw, state: ViewState):
+    """A persistent Back choice below a selection list or status details."""
+    if state.back_selected:
+        panel(draw, [6, BACK_TOP, theme.SCREEN_WIDTH - 6, CONTENT_BOTTOM],
+              fill=theme.SELECTED)
+    else:
+        draw.line([16, BACK_TOP, theme.SCREEN_WIDTH - 16, BACK_TOP],
+                  fill=theme.SURFACE_HI)
+    draw.text((16, BACK_TOP + 7), "Back", font=theme.font(14),
+              fill=theme.TEXT if state.back_selected else theme.TEXT_DIM)
+
+
 def draw_contacts(draw, state: ViewState):
     draw_header(draw, state, PAGE_TITLES[CONTACTS])
+    draw_back(draw, state)
 
     if not state.entries:
         centred(draw, 110, "no paired radios yet", theme.font(15), theme.TEXT_DIM)
@@ -259,7 +295,7 @@ def draw_contacts(draw, state: ViewState):
     row_height = CONTACT_ROW
     # One row of headroom is kept for the "n / m" counter when the list
     # is longer than the screen.
-    visible = min(len(state.entries), (CONTENT_HEIGHT - 14) // row_height)
+    visible = min(len(state.entries), (LIST_BOTTOM - CONTENT_TOP - 14) // row_height)
     visible = max(1, visible)
     first = max(0, min(state.selected_index - visible // 2,
                        len(state.entries) - visible))
@@ -268,7 +304,7 @@ def draw_contacts(draw, state: ViewState):
     for offset, entry in enumerate(state.entries[first:first + visible]):
         index = first + offset
         top = CONTENT_TOP + offset * row_height
-        chosen = index == state.selected_index
+        chosen = index == state.selected_index and not state.back_selected
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + CONTACT_PANEL],
               fill=theme.SELECTED if chosen else theme.SURFACE)
 
@@ -375,7 +411,7 @@ def draw_talk(draw, state: ViewState):
             draw.arc([cx - size, cy - size, cx + size, cy + size],
                      start=300, end=60, fill=colour, width=3)
     else:
-        centred(draw, cy - 14, "HOLD", theme.font(24, "bold"), theme.TEXT_DIM)
+        centred(draw, cy - 14, "Hold", theme.font(24, "bold"), theme.TEXT_DIM)
         centred(draw, cy + 12, "to talk", theme.font(13), theme.TEXT_FAINT)
 
     centred(draw, 46, label, theme.font(14, "bold"), colour)
@@ -406,7 +442,7 @@ def draw_talk(draw, state: ViewState):
             detail, colour = reach_detail, RANGE_COLOUR.get(reach, theme.TEXT_FAINT)
         if state.radio_deaf:
             # Worth shouting about: everything else looks like it works.
-            detail = "RADIO DEAF — check M0/M1 jumpers"
+            detail = "Radio deaf — check M0/M1 jumpers"
             colour = theme.DANGER
         elif not state.audio_ok:
             detail = state.audio_note or "no audio device"
@@ -437,6 +473,7 @@ def draw_talk(draw, state: ViewState):
 def draw_inbox(draw, state: ViewState):
     # How many are new shows on the rows (green dots) and on Home.
     draw_header(draw, state, PAGE_TITLES[INBOX])
+    draw_back(draw, state)
 
     if not state.inbox:
         centred(draw, 120, "nothing received yet", theme.font(14), theme.TEXT_DIM)
@@ -446,14 +483,14 @@ def draw_inbox(draw, state: ViewState):
         return
 
     row_height = INBOX_ROW
-    visible = max(1, min(len(state.inbox), CONTENT_HEIGHT // row_height))
+    visible = max(1, min(len(state.inbox), (LIST_BOTTOM - CONTENT_TOP) // row_height))
     first = max(0, min(state.inbox_index - visible // 2, len(state.inbox) - visible))
     first = max(0, first)
 
     for offset, item in enumerate(state.inbox[first:first + visible]):
         index = first + offset
         top = CONTENT_TOP + offset * row_height
-        chosen = index == state.inbox_index
+        chosen = index == state.inbox_index and not state.back_selected
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + INBOX_PANEL],
               fill=theme.SELECTED if chosen else theme.SURFACE)
 
@@ -491,13 +528,13 @@ def draw_status(draw, state: ViewState):
     # Grouped, because eleven flat rows read as a wall. The group headings
     # cost a line each and make the screen scannable instead.
     groups = [
-        ("STATION", [
+        ("Station", [
             ("name", state.callsign or "-"),
             ("id", f"{state.address}  ·  channel {state.channel}  ·  encrypted"),
             ("freq", f"{state.frequency_mhz} MHz  ·  air {stats.get('air', '?')}"
                      f"  ·  codec2 {state.codec_name}"),
         ]),
-        ("LINK", [
+        ("Link", [
             ("peer", "connected" if state.target_linked else "not connected"),
             ("rssi", (f"{state.last_rssi} dBm  ·  "
                       f"{theme.SIGNAL_LABELS[theme.signal_level(state.last_rssi)]}")
@@ -507,7 +544,7 @@ def draw_status(draw, state: ViewState):
                      f"rx {stats.get('packets_rx', 0)}   "
                      f"lost {stats.get('frames_dropped', 0)}"),
         ]),
-        ("HARDWARE", [
+        ("Hardware", [
             ("mode", state.radio_note or "not checked"),
             ("audio", state.audio_note or ("ok" if state.audio_ok else "unavailable")),
             ("power", power),
@@ -522,14 +559,14 @@ def draw_status(draw, state: ViewState):
 
     y = CONTENT_TOP
     for heading, rows in groups:
-        if y + 12 > CONTENT_BOTTOM:
+        if y + 11 > LIST_BOTTOM:
             break
         draw.text((MARGIN, y), heading, font=head_font, fill=theme.TEXT_FAINT)
         draw.line([MARGIN + 62, y + 4, theme.SCREEN_WIDTH - MARGIN, y + 4],
                   fill=theme.SURFACE_HI)
-        y += 13
+        y += 11
         for label, value in rows:
-            if y + 13 > CONTENT_BOTTOM:
+            if y + 13 > LIST_BOTTOM:
                 break
             colour = theme.TEXT
             if label == "audio" and not state.audio_ok:
@@ -544,9 +581,10 @@ def draw_status(draw, state: ViewState):
                       fill=theme.TEXT_FAINT)
             draw.text((value_x, y), ellipsise(draw, value, value_font, value_width),
                       font=value_font, fill=colour)
-            y += 14
-        y += 4
+            y += 13
+        y += 2
 
+    draw_back(draw, state)
     draw_footer(draw, state, _hints(STATUS))
 
 
@@ -567,7 +605,8 @@ def draw_menu(draw, state: ViewState, screen: str, title: str, items: list,
     """A list of rows to pick from: Home, Start and Settings, as MFruit OS draws lists."""
     draw_header(draw, state, title)
     rows = [Row(item["label"], subtitle=str(item.get("value", "")) or None,
-                kind="danger" if item.get("destructive") else "action")
+                kind=("back" if item["key"] == "back" else
+                      "danger" if item.get("destructive") else "action"))
             for item in items]
     draw_list(Canvas.over(draw, theme.MFRUIT), rows, selected % len(rows) if rows else 0,
               top=CONTENT_TOP + top_offset, empty="Nothing here")
@@ -596,6 +635,7 @@ def draw_settings(draw, state: ViewState):
 def draw_pair(draw, state: ViewState):
     """Radios heard pairing, and who this one is."""
     draw_header(draw, state, PAGE_TITLES[PAIR])
+    draw_back(draw, state)
     width = theme.SCREEN_WIDTH - 2 * MARGIN
     small, status_font = theme.font(11), theme.font(12, "bold")
     me = f"this radio: {state.callsign or '?'} · ID {state.address} · ch {state.channel}"
@@ -617,14 +657,14 @@ def draw_pair(draw, state: ViewState):
     row_height = SETTING_ROW
     count = len(state.pair_found)
     selected = state.pair_index % count
-    visible = max(1, min(count, (CONTENT_BOTTOM - list_top - 14) // row_height))
+    visible = max(1, min(count, (LIST_BOTTOM - list_top - 14) // row_height))
     first = max(0, min(selected - visible // 2, count - visible))
 
     text_width = theme.SCREEN_WIDTH - 16 - MARGIN - 8
     for offset, (addr, name, rssi, known) in enumerate(
             state.pair_found[first:first + visible]):
         top = list_top + offset * row_height
-        chosen = first + offset == selected
+        chosen = first + offset == selected and not state.back_selected
         panel(draw, [6, top, theme.SCREEN_WIDTH - 6, top + SETTING_PANEL],
               fill=theme.SELECTED if chosen else theme.SURFACE)
         name_font = theme.font(14, "bold" if chosen else "regular")

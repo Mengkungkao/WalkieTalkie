@@ -65,13 +65,13 @@ def go_to(app, key):
 def test_the_app_opens_on_home(radio):
     assert radio.state.screen == HOME
     assert [i["key"] for i in radio.state.home_items] == \
-        ["start", "receive", "pair", "settings", "range"]
+        ["start", "receive", "pair", "settings", "status", "range", "back"]
 
 
 def test_start_offers_all_and_a_paired_device(radio):
     go_to(radio, "start")
     assert radio.state.screen == START
-    assert [i["key"] for i in radio.state.start_items] == ["all", "device"]
+    assert [i["key"] for i in radio.state.start_items] == ["all", "device", "back"]
 
 
 def test_to_all_opens_talk_on_everyone(radio):
@@ -138,10 +138,14 @@ def test_settings_opens_from_home(radio):
     assert radio.state.screen == HOME
 
 
-def test_three_clicks_on_home_shows_status(radio):
+def test_status_opens_only_by_selecting_it(radio):
     press(radio, THRICE)
+    assert radio.state.screen == HOME
+    go_to(radio, "status")
     assert radio.state.screen == STATUS
     press(radio, TAP)
+    assert radio.state.screen == STATUS
+    press(radio, HOLD)
     assert radio.state.screen == HOME
 
 

@@ -36,18 +36,18 @@ from app.audio import devices as audio_devices
 from app.audio.capture import CLIPPED_TOO_MUCH, Recorder
 from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
                               NAME_BY_MODE, SAMPLE_RATE)
-from app.audio.playback import CUE_ERROR, Player, cues_for, voice_for
+from app.audio.playback import Player, cues_for, voice_for
 from app.config import settings as settings_module
 from app.config.settings import Contact
 from mfruit_sdk.input import (BACK, CHAR, KEYBOARD, TALK_END, TALK_START,
                               InputController)
 from mfruit_sdk.status import StatusMonitor
 
-from app.radio import linkcheck, protocol
+from app.radio import protocol
 from app.radio import modepins
 from app.config.settings import hostname_callsign
 from app.radio.link import LoraLink, NotPaired
-from app.radio.linkcheck import DISCONNECTED, IN_RANGE, UNKNOWN, WEAK, LinkMonitor
+from app.radio.linkcheck import DISCONNECTED, IN_RANGE, WEAK, LinkMonitor
 from app.radio.sx126x import PortBusy, SX126x, port_conflicts
 from app.rangetest import RangeTest
 from app.store.inbox import Inbox
@@ -59,7 +59,7 @@ from app.ui.display import Display
 from app.ui.editors import (ChoiceEditor, ClockEditor, ConfirmEditor,
                             DigitEditor)
 from app.ui.screens import (CONTACTS, EDIT, HOME, IDLE, INBOX, PAIR, PLAYING,
-                            RANGE, RECEIVING, RECORDING, SENDING, SETTINGS,
+                            RANGE, RECORDING, SENDING, SETTINGS,
                             START, STATUS, TALK, ViewState)
 from app.utils import battery, clock
 from app.utils.logger import get_logger
@@ -171,7 +171,7 @@ class WalkieApp:
         # The button and any USB / Bluetooth keyboard, as MFruit OS actions.
         self.input = InputController(
             self._on_action,
-            talk=lambda: navigation.can_talk(self.state.screen),
+            talk=self._can_talk,
             active=lambda: self.foregrounded,
             on_armed=self._on_armed,
             debounce_ms=settings.input.debounce_ms,
@@ -407,9 +407,16 @@ class WalkieApp:
         self.state.armed = armed
         self._wake.set()
 
+    def _can_talk(self) -> bool:
+        return navigation.can_talk(self.state.screen, self.state.back_selected)
+
     def _on_action(self, action):
         """One MFruit OS input action, from the button or a keyboard."""
         if action.name == TALK_START:
+            if self.display.screen_off:
+                self.display.poke()
+                self._wake.set()
+                return  # waking a dark talk page must not open the microphone
             self._on_talk_start()
             return
         if action.name == TALK_END:
@@ -434,7 +441,8 @@ class WalkieApp:
             name = navigation.route_char(self.state.screen, action.char)
         else:
             name = navigation.route(
-                self.state.screen, action.name, inbox_empty=not self.inbox.items
+                self.state.screen, action.name, inbox_empty=not self.inbox.items,
+                back_selected=self.state.back_selected,
             )
         self._dispatch(name)
 
@@ -494,6 +502,8 @@ class WalkieApp:
         self.state.screen = parents.get(self.state.screen, HOME)
         if leaving == RANGE:
             self._stop_range_test()
+        elif leaving == PAIR:
+            self._stop_pairing()
         if self.state.screen == SETTINGS:
             self._refresh_settings()
 
@@ -513,9 +523,12 @@ class WalkieApp:
              else "none yet  ·  add another radio"},
             {"key": "settings", "label": "Settings",
              "value": "name, ID, privacy channel"},
+            {"key": "status", "label": "Status",
+             "value": "radio, signal, audio and power"},
             # Temporary, for testing at distance; see app.rangetest.
             {"key": "range", "label": "Range test",
              "value": "probe a paired radio, log the signal"},
+            {"key": "back", "label": "Back to MFruit OS"},
         ]
 
     def _reach_summary(self) -> str:
@@ -537,6 +550,7 @@ class WalkieApp:
              "value": f"every paired radio on channel {self.state.channel}"},
             {"key": "device", "label": "To a paired device",
              "value": f"{paired} paired" if paired else "none yet: pair one first"},
+            {"key": "back", "label": "Back"},
         ]
 
     def _refresh_menus(self):
@@ -554,13 +568,17 @@ class WalkieApp:
             key = self.state.home_items[self.state.home_index % len(self.state.home_items)]["key"]
             {"start": lambda: self._show(START), "receive": self._open_inbox,
              "pair": self._start_pairing, "settings": self._open_settings,
-             "range": self._start_range_test}[key]()
+             "status": lambda: self._show(STATUS),
+             "range": self._start_range_test, "back": lambda: self.stop("user")}[key]()
         elif self.state.screen == START:
             key = self.state.start_items[self.state.start_index % len(self.state.start_items)]["key"]
             if key == "all":
                 self._talk_to(protocol.BROADCAST, BROADCAST_NAME)
-            else:
+            elif key == "device":
+                self.state.contacts_back = not self.state.entries
                 self._show(CONTACTS)
+            else:
+                self._go_back()
 
     # --- who to talk to ------------------------------------------------------
     def _talk_to(self, addr: int, name: str):
@@ -588,18 +606,27 @@ class WalkieApp:
         self._talk_to(entry.address, entry.name)
 
     def _next_contact(self, step: int = 1):
-        if self.roster.advance(step) is None:
-            self.state.flash("no paired radios yet")
+        count = len(self.state.entries)
+        index = count if self.state.contacts_back else self.state.selected_index
+        index = (index + step) % (count + 1)
+        self.state.contacts_back = index == count
+        if not self.state.contacts_back:
+            self.roster.selected_index = index
         self._refresh_entries()
 
     def _open_inbox(self):
         self._show(INBOX)
+        self.state.inbox = self.inbox.items
         self.state.inbox_index = 0
+        self.state.inbox_back = not self.inbox.items
 
     def _next_message(self, step: int = 1):
-        if self.inbox.items:
-            self.state.inbox_index = (
-                self.state.inbox_index + step) % len(self.inbox.items)
+        count = len(self.inbox.items)
+        index = count if self.state.inbox_back else self.state.inbox_index
+        index = (index + step) % (count + 1)
+        self.state.inbox_back = index == count
+        if not self.state.inbox_back:
+            self.state.inbox_index = index
 
     # --- handshake ----------------------------------------------------------
     def _on_hello(self, peer, name: str):
@@ -667,6 +694,7 @@ class WalkieApp:
             {"key": "reset", "label": "Reset all data",
              "value": f"{len(self.inbox.items)} message(s), paired radios, keys",
              "destructive": True},
+            {"key": "back", "label": "Back"},
         ]
 
     def _open_settings(self):
@@ -689,6 +717,7 @@ class WalkieApp:
             "channel": self._edit_channel, "voice": self._edit_voice,
             "base": self._edit_base,
             "clock": self._edit_clock, "reset": self._edit_reset,
+            "back": self._go_back,
         }[key]
         opener()
 
@@ -915,6 +944,7 @@ class WalkieApp:
         self._pair_found = {}
         self._pairing_with = None
         self.state.pair_index = 0
+        self.state.pair_back = True
         self.state.pair_status = "looking for radios"
         self._refresh_pair_view()
         self._show(PAIR)
@@ -940,6 +970,7 @@ class WalkieApp:
         self._parents[CONTACTS] = START
         self._parents[START] = HOME
         self.roster.select_address(addr)
+        self.state.contacts_back = False
         self._refresh_entries()
         self._refresh_menus()
         self.state.flash(f"paired with {name}", 4.0)
@@ -959,11 +990,12 @@ class WalkieApp:
                                     for addr, info in (self._pair_found or {}).items()}
 
     def _next_found(self, step: int = 1):
-        found = self.state.pair_found
-        if not found:
-            self.state.flash("none found yet")
-            return
-        self.state.pair_index = (self.state.pair_index + step) % len(found)
+        count = len(self.state.pair_found)
+        index = count if self.state.pair_back else self.state.pair_index
+        index = (index + step) % (count + 1)
+        self.state.pair_back = index == count
+        if not self.state.pair_back:
+            self.state.pair_index = index
 
     def _pair_selected(self):
         found = self.state.pair_found
@@ -1533,7 +1565,7 @@ class WalkieApp:
             self.state.flash("finish editing first")
             self._wake.set()
             return
-        if not navigation.can_talk(self.state.screen):
+        if not self._can_talk():
             self.state.flash("listening only here" if self.state.screen == INBOX
                              else "to talk: Home > Start")
             self._wake.set()
@@ -1935,7 +1967,7 @@ class WalkieApp:
         # And only where a hold can talk: elsewhere the pre-roll would keep
         # the codec powered for a press that cannot happen.
         should_be_armed = (self.foregrounded and not self.display.screen_off
-                           and navigation.can_talk(self.state.screen))
+                           and self._can_talk())
         if should_be_armed and not self.recorder.armed:
             self.recorder.arm()
         elif not should_be_armed and self.recorder.armed:

@@ -24,6 +24,10 @@ keyboard** works everywhere the button does.
    3 clicks                      open the row where a hold talks; replay on Talk
 ```
 
+Menus also have a **Back** row: highlight it, hold, then release to go
+back. **Back to MFruit OS** on Home leaves the app. Holding Back never
+opens the microphone.
+
 ---
 
 ## How voice fits down a 700 bps pipe
@@ -435,10 +439,13 @@ Walkie                              ▂▄▆ ≋ ▭ 76%     page name, LoRa si
                                orangepizero2w · ID 6235 · ch 3
   Start           ──▶  To ALL               ──▶  Talk to every paired radio
                        To a paired device   ──▶  pick one  ──▶  Talk
+                       Back                 ──▶  Home
   Receive         ──▶  what has come in, newest first
   Pair devices    ──▶  find another radio and pair with it
   Settings        ──▶  name, Device ID, privacy channel, …
+  Status          ──▶  radio, signal, audio and power
   Range test      ──▶  probe a paired radio and log the signal (for testing)
+  Back to MFruit OS ─▶  leave the app
 ```
 
 The controls are MFruit OS's, the same in every MFruit app and in the
@@ -450,16 +457,26 @@ a hold (`input.hold_ms`), so the first word is not lost.
 
 | Screen | tap | 2 clicks | hold | 3 clicks | 4 clicks |
 |---|---|---|---|---|---|
-| **Home** | next row | previous row | open it | Status | leave the app |
+| **Home** | next row | previous row | open it | — | leave the app |
 | **Start** | next row | previous row | **talk** | open it | back |
 | **Paired** | next radio | previous radio | **talk** | talk to it | back |
 | **Talk** | Receive | — | **talk** | replay last voice | back |
 | **Receive** | next message | previous message | play it (and fetch any gaps) | play it | back |
-| **Status** | back | — | Settings | Settings | back |
+| **Status** | stay | stay | back | — | back |
 | **Settings** | next setting | previous setting | open it | — | back |
 | **Pair** | next radio found | previous | pair with it | — | back |
 | **Range test** | mark this spot | — | **talk** to the radio under test | probe now | stop |
 | *editor* | change value | change it back | next field / save | — | cancel |
+
+**Back is a selectable row** on Home, Start, Settings, Paired, Receive
+and Pair, and the single selected control on Status. Paired, Receive and
+Pair keep it at the bottom of the screen. On Back, **hold and release
+goes back**, even on a screen where holding another row talks; the footer
+changes to **release to back** (or **release to exit** on Home). Three
+clicks does nothing on Back. Four clicks and Esc remain shortcuts.
+
+Status is opened from its Home row. Three clicks on Home no longer opens
+Status, so an incomplete four-click exit cannot accidentally show it.
 
 **Holding the button talks only inside Start** — on the Start menu, the
 Paired list and Talk — to whoever you last chose there: ALL until you
@@ -467,16 +484,19 @@ pick someone. (And on the Range test, to the radio under test, so voice
 can be tried at each spot.) Home shows who that is (`now talking to
 jarvis`). Because the hold is taken there, **three clicks opens** the
 highlighted row on those screens. Everywhere else a hold opens the row
-and never transmits: menus are for choosing, and a hold that transmitted
-while you were looking for a setting went out to whoever was last
+and never transmits. Selecting Back also disables hold-to-talk and Space
+until you move to another row. Menus are for choosing, and a hold that
+transmitted while you were looking for a setting went out to whoever was last
 chosen, unasked. **Receive is for listening** — to what has arrived, and
 to new messages, which still play as they come in — not for talking.
 The microphone is only kept warm where a hold can talk, which also saves
 power.
 
 "Back" returns to wherever you came from: Receive opened from Talk goes
-back to Talk, opened from Home goes back Home. An empty Receive screen
-leaves on any press rather than sitting there ignoring you.
+back to Talk, opened from Home goes back Home. Empty Paired, Receive and
+Pair lists select Back automatically: taps keep you on that screen, and
+holding then releasing Back leaves it. A new message or discovered radio
+does not move the selection away from Back.
 
 ### With a keyboard
 
@@ -558,7 +578,8 @@ this radio: orangepizero2w · ID 6235
 1. Each radio announces itself every 3 seconds while the screen is open,
    and lists the other radios it hears doing the same — on any privacy
    channel; a radio on another channel shows its channel (`ch 2`).
-2. On one radio, highlight the other and **hold** (then release) to pair. It shows a
+2. Pair opens with **Back** selected. Tap to highlight the other radio and
+   **hold** (then release) to pair. It shows a
    four-digit **code** and waits.
 3. The other radio asks: *orangepizero2w wants to pair — code 4821*.
    **Check the code is the same on both screens.** Then tap onto
@@ -576,8 +597,8 @@ would make the two screens show different codes. If they differ, say no.
 A refusal says so (`jarvis said no`), and nothing is saved on either
 side: the radio that asked saves the other only once the answer arrives,
 and only if the answer carries the same key its beacon did. The window
-closes by itself after two minutes, and leaving the screen — 4 clicks
-or Esc — stops it. A radio that is not pairing ignores
+closes by itself after two minutes, and leaving the screen — select Back,
+or use 4 clicks or Esc — stops it. A radio that is not pairing ignores
 beacons and requests, so a stranger nearby can neither show up on your
 lists nor make your radio ask you anything. Two minutes of pairing costs
 a few seconds of the hour's duty-cycle budget.
@@ -1444,3 +1465,17 @@ voice path reports itself unavailable and the app runs on.
 Radio register layout derived from Waveshare's SX126X HAT sample code.
 Speech coding by [Codec2](https://www.rowetel.com/codec2.html) (David
 Rowe, LGPL). Display and button access through the Whisplay daemon.
+
+## MFruit OS 1.4.0 keyboard compatibility
+
+Vendored SDK 1.2.0 reads keys from MFruit OS's foreground key hub while the
+launcher holds keyboards exclusively. Standalone use falls back to evdev.
+Deploy this SDK with MFruit OS 1.4.0 so keyboard input continues to work.
+
+
+## MFruit OS lifecycle validation
+
+Managed launches preserve MFruit OS's launch wrapper and logging registration;
+standalone launches still register themselves. A hold on a dark talk screen
+only wakes it. Release, then hold again to record. Regression coverage lives
+in `tests/test_board_registration.py` and `tests/test_controls.py`.
