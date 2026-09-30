@@ -45,10 +45,14 @@ CLICKS = {1: TAP, 2: DOUBLE, 3: TRIPLE, 4: QUAD}
 class ButtonGestures:
     def __init__(self, on_gesture: Callable[[str, float], None], click_window_ms: int = 400,
                  long_press_ms: int = 700, debounce_ms: int = 75,
-                 clock: Callable[[], float] = time.monotonic, threaded: bool = True):
+                 clock: Callable[[], float] = time.monotonic, threaded: bool = True,
+                 hold_after: Callable[[], float] | None = None):
         self.on_gesture = on_gesture
         self.click_window = click_window_ms / 1000.0
         self.long_press = long_press_ms / 1000.0
+        # Seconds until a still-held press is a hold, asked at each press
+        # (a talk screen starts talking sooner than a menu arms).
+        self.hold_after = hold_after
         self.debounce = debounce_ms / 1000.0
         self.clock = clock
         self._lock = threading.Condition()
@@ -110,7 +114,7 @@ class ButtonGestures:
                 return                   # contact chatter after a release
             self._pressed = True
             self._press_at = now
-            self._hold_at = now + self.long_press
+            self._hold_at = now + (self.hold_after() if self.hold_after else self.long_press)
             self._burst_at = 0.0         # wait for this press before resolving clicks
             self._lock.notify_all()
 
@@ -165,8 +169,13 @@ class ButtonGestures:
                     continue
                 # Computed and waited on under the lock, so a press that
                 # lands now notifies this wait instead of being missed.
+                # Nothing pending: sleep until an edge (or stop) wakes us,
+                # so an idle app makes no wakeups at all.
                 deadlines = [d for d in (self._hold_at, self._burst_at) if d]
-                wait = min(deadlines) - self.clock() if deadlines else 1.0
+                if not deadlines:
+                    self._lock.wait()
+                    continue
+                wait = min(deadlines) - self.clock()
                 if wait > 0:
                     self._lock.wait(timeout=wait)
 

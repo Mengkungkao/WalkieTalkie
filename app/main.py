@@ -39,7 +39,6 @@ from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
 from app.audio.playback import CUE_ERROR, Player, cues_for, voice_for
 from app.config import settings as settings_module
 from app.config.settings import Contact
-from mfruit_sdk.daemon import own_escape_key
 from mfruit_sdk.input import (BACK, CHAR, KEYBOARD, TALK_END, TALK_START,
                               InputController)
 from mfruit_sdk.status import StatusMonitor
@@ -177,7 +176,8 @@ class WalkieApp:
             on_armed=self._on_armed,
             debounce_ms=settings.input.debounce_ms,
             click_window_ms=settings.input.click_window_ms,
-            long_press_ms=settings.input.hold_ms,
+            talk_press_ms=settings.input.hold_ms,
+            long_press_ms=settings.input.long_press_ms,
         )
         self.input.attach(self.board)
         # WiFi level for the MFruit OS status bar (battery comes from app.utils.battery).
@@ -1994,8 +1994,6 @@ class WalkieApp:
             self.mode, "ok" if self.link else "offline",
             self.state.audio_note, self.state.codec_name,
         )
-        if self.mode in ("daemon", "waiting"):
-            own_escape_key(board_module.APP_ID)   # Esc is "back" in here
         self.input.start()
         self.status.start()
         # Warm the codec now: a cold open costs ~690 ms of lost speech,

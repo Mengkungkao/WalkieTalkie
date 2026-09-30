@@ -56,7 +56,7 @@ def _draw_battery(c, x: int, y: int, percent: int, charging: bool) -> int:
 
 
 def status_bar(c, title: str = "", status=None, badge: Optional[tuple] = None,
-               dot=None, reserve: int = 0) -> int:
+               dot=None, reserve: int = 0, title_sizes: tuple = (17,)) -> int:
     """Page name on the left; WiFi signal and battery on the right.
 
     ``status`` is a ``mfruit_sdk.status.Status`` (or anything with
@@ -66,7 +66,9 @@ def status_bar(c, title: str = "", status=None, badge: Optional[tuple] = None,
     short: the page name gets whatever width is left. ``reserve`` keeps
     that many pixels free left of those for the app to draw its own
     indicator (e.g. a radio signal meter); the return value is the x where
-    that slot starts.
+    that slot starts. ``title_sizes`` (largest first, e.g. (17, 15, 13))
+    lets a name that is data, such as another radio's, shrink before it
+    is cut with an ellipsis.
     """
     t = c.theme
     x = SCREEN_W - CORNER_INSET
@@ -95,7 +97,11 @@ def status_bar(c, title: str = "", status=None, badge: Optional[tuple] = None,
         x -= 6
     if title:
         left = CORNER_INSET - 4
-        c.text(left, STATUS_Y - 1, title, 17, "bold", t.text, max_width=max(20, x - left - 6))
+        room = max(20, x - left - 6)
+        size = next((s for s in title_sizes if c.text_width(title, s, "bold") <= room),
+                    title_sizes[-1])
+        c.text(left, STATUS_Y - 1 + (17 - size) // 2, title, size, "bold", t.text,
+               max_width=room)
     return slot
 
 

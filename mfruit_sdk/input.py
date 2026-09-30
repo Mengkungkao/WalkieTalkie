@@ -17,7 +17,8 @@ key does the same thing in every app and in MFruit OS itself:
     key          -                      Home, End, PageUp, PageDown, Delete
 
 **Talk screens.** Where ``talk()`` is true, holding the button (or Space)
-talks while held; there, 3x ("extra") opens the selected item, because the
+talks while held -- after ``talk_press_ms`` if given, so the microphone
+opens promptly; there, 3x ("extra") opens the selected item, because the
 hold is taken. Everywhere else a hold *arms* at ``long_press_ms``
 (``on_armed(True)``, show "release to open") and selects on release.
 While ``typing()`` is true, Space types a space instead of talking.
@@ -81,6 +82,7 @@ class InputController:
                  active: Callable[[], bool] = _always,
                  on_armed: Callable[[bool], None] | None = None,
                  click_window_ms: int = 400, long_press_ms: int = 700, debounce_ms: int = 75,
+                 talk_press_ms: int | None = None,
                  keyboard: bool = True, clock: Callable[[], float] = time.monotonic,
                  threaded: bool = True):
         self.on_action = on_action
@@ -89,9 +91,15 @@ class InputController:
         self.active = active
         self.on_armed = on_armed or (lambda armed: None)
         self.clock = clock
+        hold_after = None
+        if talk_press_ms is not None:
+            # Talking should start promptly; opening from a menu stays a
+            # deliberate hold, as in MFruit OS.
+            talk_s, select_s = talk_press_ms / 1000.0, long_press_ms / 1000.0
+            hold_after = lambda: talk_s if self.talk() else select_s  # noqa: E731
         self.gestures = ButtonGestures(self._on_gesture, click_window_ms=click_window_ms,
                                        long_press_ms=long_press_ms, debounce_ms=debounce_ms,
-                                       clock=clock, threaded=threaded)
+                                       clock=clock, threaded=threaded, hold_after=hold_after)
         self.keys = KeyReader(self.key_event) if keyboard else None
         self._lock = threading.RLock()
         self._armed = False

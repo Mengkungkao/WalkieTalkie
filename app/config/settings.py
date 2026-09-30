@@ -102,6 +102,10 @@ class InputSettings:
     # Push-to-talk starts this long after the press, well above the
     # 30-60 ms a real click lasts, and low enough to feel immediate.
     hold_ms: int = 350
+    # On every other screen a hold opens the highlighted row after this
+    # long (acting on release), the same as MFruit OS's long press. Longer
+    # than a talk hold: choosing is deliberate, talking should be instant.
+    long_press_ms: int = 700
 
 
 @dataclass

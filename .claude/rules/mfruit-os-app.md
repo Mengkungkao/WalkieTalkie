@@ -28,13 +28,16 @@ Source of truth: `MFruitOS/docs/APP_RULES.md`. Copies live in each app at
   | type | — | letters, digits, Backspace (only where a screen takes text) |
 
 - **Menus and lists** use exactly: tap next · 2× previous · hold open ·
-  4× back. A hold only *arms* at the threshold (`on_armed(True)`: show
-  "release to …") and acts on release — never while the button is down.
+  4× back. A hold only *arms* at the threshold — MFruit OS's long press,
+  `long_press_ms=700` — (`on_armed(True)`: show "release to …") and acts on
+  release, never while the button is down.
 - **Back from the app's first screen leaves the app** (4× or Esc). Show a
   short toast ("Exiting") and exit.
 - **Talk screens** (push-to-talk, voice input) set `talk=` to return True:
   there, hold or Space talks while held, and 3× opens the selected item
   because the hold is taken. Nowhere else may a hold transmit or record.
+  Talking may start sooner than a menu hold arms (`talk_press_ms=350`), so
+  the first word is kept; choosing stays a deliberate 700 ms hold.
 - While the user is typing (`typing=` returns True), Space types a space.
 - **Act only while the app owns the screen.** Pass
   `active=lambda: board.foreground_ready` and call `controller.reset()` when
@@ -45,13 +48,21 @@ Source of truth: `MFruitOS/docs/APP_RULES.md`. Copies live in each app at
 - Footer hints and the handler come from **one table**, so the screen can
   never advertise a gesture the code does not implement.
 - A press on a dark (dimmed-off) screen only wakes it.
+- **One exception, stated where it applies:** an app whose button logic lives
+  outside Python (the AI chatbot's Node core, which talks on the press and
+  counts clicks itself) keeps it there, provided its gestures match MFruit
+  OS's (hold talks, 4× leaves). Its keyboard still goes through
+  `InputController`, in the Python process that owns the screen.
 
 ## 2. Registration and lifecycle
 
 - Register with `exit_gesture: "none"` (the app implements 4× = back) and
   `disable_esc_exit_key: true` in the packaging JSON **and** call
   `mfruit_sdk.daemon.own_escape_key(APP_ID)` at start-up (the Whisplay
-  runtime client's `register()` does not send that flag).
+  runtime client's `register()` does not send that flag) — right after
+  registering and **before taking the screen**: every `app.register` makes
+  whisplay-daemon redraw its own desktop, which flashes over an app that
+  already owns the screen.
 - Draw the first frame as soon as possible: MFruit OS shows "Opening <App>"
   until the app's first frame.
 - On `app_exit_requested`, stop within 3 seconds. When the user leaves, exit

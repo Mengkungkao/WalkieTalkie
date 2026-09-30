@@ -9,9 +9,12 @@ which is why a reader must ignore keys while its app does not own the screen
 
 Only devices with letter keys count as keyboards: the Orange Pi's power
 button, its ADC buttons and its IR receiver are input devices too. A
-keyboard plugged in, or paired over Bluetooth, later is picked up within
-``RESCAN_SECONDS``; one that goes away while a key is held reports that key
-released, so a held Space cannot leave the microphone open. US layout.
+keyboard plugged in, or paired over Bluetooth, later is picked up at once:
+the reader watches /dev/input with inotify, so it makes no wakeups at all
+while nothing happens (where inotify is unavailable it looks again every
+``RESCAN_SECONDS``). A keyboard that goes away while a key is held reports
+that key released, so a held Space cannot leave the microphone open.
+US layout.
 
 Events are ``KeyEvent(kind, value, action, code)``:
 
@@ -21,12 +24,14 @@ Events are ``KeyEvent(kind, value, action, code)``:
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import logging
 import os
 import select
 import struct
 import threading
-from typing import Callable, NamedTuple
+from typing import Callable, NamedTuple, Optional
 
 log = logging.getLogger("mfruit_sdk.keys")
 
@@ -149,6 +154,51 @@ class KeyDecoder:
         return KeyEvent("char", pair[1] if upper else pair[0], value, code)
 
 
+class DeviceWatch:
+    """inotify on the input directory: a device node appeared, went away,
+    or had its permissions set (udev gives /dev/input/eventN to the input
+    group just after creating it)."""
+
+    IN_ATTRIB, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x4, 0x80, 0x100, 0x200
+
+    def __init__(self, path: str):
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1 failed")
+        mask = self.IN_ATTRIB | self.IN_MOVED_TO | self.IN_CREATE | self.IN_DELETE
+        if libc.inotify_add_watch(fd, os.fsencode(path), mask) < 0:
+            errno = ctypes.get_errno()
+            os.close(fd)
+            raise OSError(errno, f"cannot watch {path}")
+        self.fd = fd
+
+    @classmethod
+    def open(cls, path: str) -> Optional["DeviceWatch"]:
+        try:
+            return cls(path)
+        except (OSError, AttributeError) as exc:     # no inotify: fall back to polling
+            log.debug("no inotify on %s (%s); polling for keyboards", path, exc)
+            return None
+
+    def drain(self):
+        """Discard queued notifications (the caller rescans instead)."""
+        while True:
+            try:
+                if not os.read(self.fd, 4096):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+
+    def close(self):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
 class KeyReader:
     """Reads every keyboard on the board on its own thread; calls ``on_event(KeyEvent)``."""
 
@@ -167,6 +217,11 @@ class KeyReader:
     def connected(self) -> bool:
         """Is a keyboard plugged in (and readable) right now?"""
         return bool(self._open)
+
+    @property
+    def devices(self) -> list:
+        """eventN names of the keyboards being read right now."""
+        return sorted(name for name, _ in list(self._open.values()))
 
     def keyboards(self) -> list:
         """eventN names of the input devices that are keyboards."""
@@ -241,34 +296,53 @@ class KeyReader:
 
     def _loop(self):
         wake = self._wake[0]
+        watch = DeviceWatch.open(self.input_dir)
+        rescan = True
         try:
             while not self._stop.is_set():
-                self._scan()
-                # Wait for keys, for stop(), or for the next rescan (hot-plug).
+                if rescan:
+                    self._scan()
+                    rescan = False
+                # Wait for keys, for stop(), for a device to come or go --
+                # or, without inotify, for the next look round.
+                fds = list(self._open) + [wake] + ([watch.fd] if watch else [])
                 try:
-                    ready, _, _ = select.select(list(self._open) + [wake], [], [], self.rescan)
+                    ready, _, _ = select.select(fds, [], [],
+                                                None if watch else self.rescan)
                 except (OSError, ValueError):
                     for fd in list(self._open):
                         self._close(fd)
                     self._stop.wait(self.rescan)
+                    rescan = True
                     continue
+                if not ready and not watch:
+                    rescan = True
                 for fd in ready:
-                    if fd != wake:
-                        self._read(fd)
+                    if fd == wake:
+                        continue
+                    if watch and fd == watch.fd:
+                        watch.drain()
+                        rescan = True
+                    elif not self._read(fd):
+                        rescan = True        # it went away: look again
         finally:
             for fd in list(self._open):
                 self._close(fd)
+            if watch:
+                watch.close()
 
-    def _read(self, fd):
+    def _read(self, fd) -> bool:
+        """Read and dispatch what is waiting; False if the device went away."""
         try:
             data = os.read(fd, EVENT.size * 64)
         except BlockingIOError:
-            return
+            return True
         except OSError:
             self._close(fd)          # unplugged, or the Bluetooth link dropped
-            return
+            return False
         if data and fd in self._open:
             self._dispatch(self._open[fd][1].feed(data))
+        return True
 
     def _dispatch(self, events):
         for event in events:

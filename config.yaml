@@ -75,8 +75,11 @@ input:
   # Measured on this button: deliberate multi-clicks land 158-522 ms
   # apart, ordinary clicks 1214 ms or more. 700 ms is the empty band.
   click_window_ms: 700
-  # Push-to-talk opens the mic this long after the press.
+  # Push-to-talk opens the mic this long after the press (talk screens).
   hold_ms: 350
+  # Elsewhere a hold opens the highlighted row after this long, and acts
+  # on release -- MFruit OS's own long press, so menus feel the same.
+  long_press_ms: 700
 
 power:
   # Periodic "I am here" beacons cost duty-cycle budget. Off by default;

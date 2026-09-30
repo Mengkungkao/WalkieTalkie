@@ -443,8 +443,10 @@ Walkie                              ▂▄▆ ≋ ▭ 76%     page name, LoRa si
 
 The controls are MFruit OS's, the same in every MFruit app and in the
 launcher itself: **tap next · 2 clicks previous · hold (then release)
-open · 4 clicks back**. A hold on a menu only *arms* — the footer changes
-to **release to open** — and acts when you let go.
+open · 4 clicks back**. A hold on a menu only *arms*, after 0.7 s (MFruit
+OS's long press, `input.long_press_ms`) — the footer changes to **release
+to open** — and acts when you let go. Talking starts sooner, 0.35 s into
+a hold (`input.hold_ms`), so the first word is not lost.
 
 | Screen | tap | 2 clicks | hold | 3 clicks | 4 clicks |
 |---|---|---|---|---|---|

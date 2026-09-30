@@ -44,8 +44,8 @@ def wired(radio):
     radio.input = InputController(
         radio._on_action, talk=lambda: navigation.can_talk(radio.state.screen),
         active=lambda: radio.foregrounded, on_armed=radio._on_armed,
-        click_window_ms=400, long_press_ms=700, keyboard=False, clock=clock,
-        threaded=False)
+        click_window_ms=400, long_press_ms=700, talk_press_ms=350, keyboard=False,
+        clock=clock, threaded=False)
     radio.clock = clock
     return radio
 
@@ -94,6 +94,23 @@ def test_a_hold_inside_start_talks_while_held(wired):
     step(wired, 0.8)
     assert wired.recorder.started == 1          # talking before release
     assert wired.state.screen == TALK
+    wired.input.release()
+
+
+def test_talking_starts_promptly_but_opening_is_a_deliberate_hold(wired):
+    """350 ms opens the mic on a talk screen; a menu row needs MFruit OS's 700 ms."""
+    wired.input.press()
+    step(wired, 0.4)
+    assert not wired.state.armed and wired.state.screen == HOME
+    wired.input.release()                       # too short to open: it was a tap
+    step(wired, 0.5)
+    assert wired.state.screen == HOME and wired.state.home_index == 1
+    tap(wired, 2)                               # back to Start
+    hold(wired)                                 # open it
+    assert wired.state.screen == START
+    wired.input.press()
+    step(wired, 0.4)
+    assert wired.recorder.started == 1          # already talking
     wired.input.release()
 
 

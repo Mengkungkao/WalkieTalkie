@@ -3,6 +3,11 @@
     own_escape_key(app_id)   make Esc reach the app as "back" (the daemon
                              otherwise closes a foreground app on Esc)
 
+Call it right after the app registers and **before it takes the screen**:
+every ``app.register`` makes whisplay-daemon redraw its own desktop straight
+to the LCD, which flashes over an app that already owns the screen (unless
+MFruit OS's background wrapper is installed).
+
 The Whisplay runtime client's ``register()`` does not send
 ``disable_esc_exit_key``, and the daemon only changes the fields a
 registration names, so a second, partial ``app.register`` sets just this
