@@ -1114,6 +1114,11 @@ receive, so `tests/test_link_end_to_end.py` runs two complete radios
 against each other — text, multi-fragment voice, a dropped fragment, and
 a duty-cycle exhaustion — entirely in software.
 
+When changing behavior, reproduce the issue, add a focused regression test,
+and run the affected tests before the full suite. Keep **Using it** aligned
+with `app/ui/navigation.py`, which owns per-screen actions and footer hints.
+Report hardware checks as unverified unless they were actually run.
+
 ---
 
 ## Troubleshooting
