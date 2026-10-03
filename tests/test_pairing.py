@@ -17,6 +17,7 @@ import pytest
 from app.main import WalkieApp
 from app.radio import protocol
 from app.radio.link import Peer
+from app.store import shared_radio
 from app.store.inbox import Inbox
 from app.store.keyring import Keyring
 from app.store.overrides import Overrides
@@ -82,6 +83,7 @@ def radio(app, tmp_path):
     app.board = SimpleNamespace(foreground_ready=True)
     app._pending_pair = None
     app._parents = {}
+    app.shared_radio = shared_radio._sdk() is not None   # the store is private per test
     app._refresh_entries()
     app._refresh_menus()
     return app
@@ -333,6 +335,13 @@ def test_an_unreadable_request_is_ignored(radio, jarvis, tmp_path):
     assert radio._pending_pair is None
 
 
+def assert_shared_id(radio, address):
+    """The Messenger on this device follows a Device ID changed here."""
+    if radio.shared_radio:                     # False only without cryptography
+        from mfruit_sdk.radio import settings as shared
+        assert shared.load_device().address == address
+
+
 # --- the same ID twice --------------------------------------------------------------
 def test_a_clash_moves_the_radio_that_is_pairing(radio, tmp_path):
     open_pairing(radio)
@@ -342,6 +351,7 @@ def test_a_clash_moves_the_radio_that_is_pairing(radio, tmp_path):
     assert radio.link.addr == new
     assert Overrides(tmp_path).get("radio", "address") == new
     assert "taken" in radio.state.active_banner
+    assert_shared_id(radio, new)
 
 
 def test_a_radio_not_pairing_answers_instead_of_moving(radio):
@@ -359,6 +369,7 @@ def test_a_new_device_id_reaches_the_radio_at_once(radio):
     play(radio, HOLD)
     assert radio.link.addr == 9
     assert "re-pair" in radio.state.active_banner
+    assert_shared_id(radio, 9)
 
 
 def test_reset_forgets_every_paired_radio_and_its_keys(radio, jarvis):
@@ -511,3 +522,16 @@ def test_the_pair_list_shows_a_radio_on_another_channel(radio, jarvis):
         rssi_dbm=-80, received_at=time.time(), dst=protocol.BROADCAST, channel=4)
     radio._on_radio_message(beacon_message, Peer(JARVIS, name="jarvis"))
     assert radio.state.pair_channels[JARVIS] == 4
+
+
+def test_radios_paired_here_and_there_are_shared_both_ways(radio):
+    if not radio.shared_radio:
+        pytest.skip("needs cryptography")
+    from app.config.settings import Contact
+    radio.keyring.add_peer(JARVIS, bytes(32), bytes(32))
+    radio.keyring.add_peer(4444, bytes(32), bytes(32))
+    radio.settings.contacts.append(Contact(name="jarvis", address=JARVIS))
+    shared_radio.remember_contact(4444, "Valley")          # paired in the Messenger
+    radio._merge_shared_contacts()
+    assert shared_radio.shared_contacts() == {JARVIS: "jarvis", 4444: "Valley"}
+    assert 4444 in contacts(radio)

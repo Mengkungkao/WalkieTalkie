@@ -87,3 +87,23 @@ def test_check_and_warn_returns_the_same_shape(monkeypatch):
     fake_reader(monkeypatch, [(1, 1)])
     result = modepins.check_and_warn()
     assert set(result) >= {"readable", "transparent", "detail"}
+
+
+def test_m1_high_only_while_frames_are_drawn_is_not_deaf(monkeypatch):
+    """MFruit OS parks the LCD's DC line (M1) low between frames; a sample
+    taken while the screen draws catches a few of them."""
+    fake_reader(monkeypatch, [(0, 1) if i == 3 else (0, 0) for i in range(12)])
+    result = modepins.sample(samples=12, seconds=0.0)
+    assert result["transparent"] and result["frames_only"]
+    assert result["detail"] == "M1 high only during screen updates (8% of the time)"
+
+
+def test_m1_left_high_by_the_display_driver_is_deaf(monkeypatch):
+    fake_reader(monkeypatch, [(0, 1)])
+    result = modepins.sample(samples=12, seconds=0.0)
+    assert not result["transparent"] and not result["frames_only"]
+
+
+def test_a_dimmed_backlight_with_frames_is_still_deaf(monkeypatch):
+    fake_reader(monkeypatch, [(1, 0), (0, 1), (0, 0), (0, 0)] * 3)
+    assert not modepins.sample(samples=12, seconds=0.0)["transparent"]

@@ -51,7 +51,7 @@ from app.radio.linkcheck import DISCONNECTED, IN_RANGE, WEAK, LinkMonitor
 from app.radio.sx126x import PortBusy, SX126x, port_conflicts
 from app.rangetest import RangeTest
 from app.store.inbox import Inbox
-from app.store.keyring import Keyring
+from app.store import shared_radio
 from app.store.overrides import Overrides
 from app.store.roster import BROADCAST_NAME, Roster
 from app.ui import navigation, screens, theme
@@ -123,6 +123,7 @@ class WalkieApp:
     # Defaults for state that __init__ would otherwise have to set before
     # anything can run; tests build the app without hardware via __new__.
     link = None
+    shared_radio = False        # True once the SDK's shared radio store is in use
     # What to say when there is no link: why the radio did not open.
     radio_offline = "radio offline"
     keyring = None
@@ -150,6 +151,9 @@ class WalkieApp:
 
     def __init__(self, settings):
         self.settings = settings
+        # One Device ID, set of keys and contact list per device, shared with
+        # the Messenger: settle the ID before anything shows or uses it.
+        self.shared_radio = shared_radio.sync_identity(settings, Overrides(settings.data_dir))
         self.running = True
         self._closing = False
         self._wake = threading.Event()
@@ -191,7 +195,8 @@ class WalkieApp:
         # --- storage ----------------------------------------------------
         data_dir = settings.data_dir
         self.overrides = Overrides(data_dir)
-        self.keyring = Keyring(data_dir)
+        self.keyring = shared_radio.open_keyring(data_dir)
+        self._merge_shared_contacts()
         clock.set_offset(self.overrides.clock_offset)
         self.roster = Roster(settings.contacts, data_dir)
         self.inbox = Inbox(data_dir)
@@ -855,6 +860,8 @@ class WalkieApp:
         """Use a new Device ID from now on. The caller persists it."""
         self.settings.radio.address = address
         self.state.address = address
+        if self.shared_radio:
+            shared_radio.save_identity(address, self.settings.identity.callsign)
         if self.link is not None:
             self.link.set_address(address)
         # Cues are pitched by address, so this radio's sound moves with it.
@@ -866,6 +873,8 @@ class WalkieApp:
         self.overrides.set("identity", "callsign", name)
         self.settings.identity.callsign = name
         self.state.callsign = name
+        if self.shared_radio:
+            shared_radio.save_identity(self.settings.radio.address, name)
         if self.link is not None:
             self.link.callsign = name
         self.cues = cues_for(self.settings.radio.address, name)
@@ -904,8 +913,26 @@ class WalkieApp:
         # else has to change, here or on any other radio.
         self.state.flash(f"voice: {self._voice_summary(name).split('  ·')[0]}", 3.0)
 
+    def _merge_shared_contacts(self):
+        """Radios paired in another radio app (the Messenger) become contacts,
+        and the names of radios paired here are shared with it."""
+        if not self.shared_radio or self.keyring is None:
+            return
+        names = shared_radio.shared_contacts()
+        known = {c.address for c in self.settings.contacts}
+        for contact in self.settings.contacts:
+            if contact.address in self.keyring.paired and contact.address not in names:
+                shared_radio.remember_contact(contact.address, contact.name)
+        for address in self.keyring.paired:
+            if address not in known and address != self.settings.radio.address:
+                name = names.get(address) or f"node {address}"
+                if self.overrides.add_contact(name, address):
+                    self.settings.contacts.append(Contact(name=name, address=address))
+                    log.info("contact %s (%d) paired in another radio app", name, address)
+
     def _add_contact(self, name: str, address: int) -> bool:
         """Save a station as a contact. False if it already was one."""
+        shared_radio.remember_contact(address, name)
         if not self.overrides.add_contact(name, address):
             self._rename_contact(address, name)
             return False
@@ -918,6 +945,7 @@ class WalkieApp:
         """A paired radio announced a new name; show it under that."""
         if not name or not self.overrides.rename_contact(address, name):
             return
+        shared_radio.remember_contact(address, name)
         for contact in self.settings.contacts:
             if contact.address == address:
                 contact.name = name
@@ -1171,7 +1199,10 @@ class WalkieApp:
         # New keys: every radio this one paired with has to pair again,
         # and nothing recorded off the air before can be opened with them.
         if self.keyring is not None:
+            # The keys are shared: this unpairs every radio in every radio app.
             self.keyring.reset()
+            for address in shared_radio.shared_contacts():
+                shared_radio.forget_contact(address)
         self.settings.contacts = []
         self.roster = Roster(self.settings.contacts, self.settings.data_dir)
         self._target = (protocol.BROADCAST, BROADCAST_NAME)
